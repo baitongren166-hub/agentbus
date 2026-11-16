@@ -9,7 +9,7 @@ agentbus 把你电脑上已经装好的 agent —— Claude Code、Codex、Antig
 
 <p align="center"><a href="#安装">下载</a> · <a href="#快速上手">快速上手</a> · <a href="#截图">截图</a> · <a href="#和已有项目有什么不同">对比</a></p>
 
-<p align="center"><img src="docs/screenshots/zh/base.jpg" width="900" alt="基地：像素办公室，每位队员坐在自己的工位上"></p>
+<p align="center"><img src="docs/screenshots/zh/hero.jpg" width="900" alt="悬浮窗展开浮在基地上方，每位队员坐在像素办公室的工位上"></p>
 
 ## 痛点
 

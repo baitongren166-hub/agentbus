@@ -9,7 +9,7 @@ agentbus turns the agents already on your computer — Claude Code, Codex, Antig
 
 <p align="center"><a href="#install">Download</a> · <a href="#quick-start">Quick start</a> · <a href="#screenshots">Screenshots</a> · <a href="#how-is-this-different">Comparison</a></p>
 
-<p align="center"><img src="docs/screenshots/en/base.jpg" width="900" alt="The Base: a pixel office where each teammate works at a desk"></p>
+<p align="center"><img src="docs/screenshots/en/hero.jpg" width="900" alt="The floating island expanded over the Base, where each teammate works at a desk in a pixel office"></p>
 
 ## The problem
 
