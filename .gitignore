@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.pyc
+node_modules/
+app/src-tauri/target/
+build/
+release/
+.art-v2-work/
+*.bak-*
+*.bak
+ui/i18n/work/
