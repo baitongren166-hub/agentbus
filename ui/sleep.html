@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>agentbus</title>
+<style>html, body { margin: 0; background: #f6f2ec; } @media (prefers-color-scheme: dark) { html, body { background: #1c1b1d; } }</style>
+</head>
+<body>
+<script>
+// 主窗口藏起来时停在这个空页面（原来的页面整个销毁，立绘和动画图层占的内存才会还给系统）；窗口一显示就回原来那一页
+const back = () => location.replace("/" + (location.hash || "#base"));
+if (!document.hidden) back();
+document.addEventListener("visibilitychange", () => { if (!document.hidden) back(); });
+</script>
+</body>
+</html>

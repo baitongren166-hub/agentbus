@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>agentbus</title>
+<link rel="icon" href="assets/app-icon-128.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+  <nav class="rail" aria-label="主导航">
+    <div class="logo" aria-hidden="true"><img src="assets/app-icon-128.png" alt=""></div>
+    <a class="nav" href="#base" data-page="base"></a>
+    <a class="nav" href="#chat" data-page="chat"></a>
+    <a class="nav" href="#office" data-page="office"></a>
+    <a class="nav" href="#team" data-page="team"></a>
+    <a class="nav" href="#playbook" data-page="playbook"></a>
+    <a class="nav" href="#quests" data-page="quests"></a>
+    <a class="nav" href="#report" data-page="report"></a>
+    <a class="nav" href="#settings" data-page="settings"></a>
+    <div class="rail-foot">
+      <button class="proj" id="proj" title="切换 / 新建项目"></button>
+      <span class="live-dot" id="live" title="实时同步"></span>
+    </div>
+  </nav>
+  <main class="main" id="main"><div class="page" id="page"></div></main>
+</div>
+<div id="layer"></div>
+<script src="i18n/en.js"></script>
+<script src="shared.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
