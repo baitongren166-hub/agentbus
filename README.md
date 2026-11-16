@@ -15,7 +15,7 @@ agentbus turns the agents already on your computer — Claude Code, Codex, Antig
 
 <table><tr>
 <td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-concept.mp4"><img src="docs/videos/concept.jpg" alt="Concept film"></a><br><b>Concept film</b><br><sub>What if they were a team? · 1:32</sub></td>
-<td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-launch.mp4"><img src="docs/videos/launch.jpg" alt="Launch video"></a><br><b>Launch video</b><br><sub>Everything it does · 1:06</sub></td>
+<td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-launch.mp4"><img src="docs/videos/launch.jpg" alt="Launch video"></a><br><b>Launch video</b><br><sub>Each one is good at something · 0:58</sub></td>
 <td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-demo.mp4"><img src="docs/videos/demo.jpg" alt="Walkthrough"></a><br><b>Walkthrough</b><br><sub>Real UI, step by step · 1:48</sub></td>
 </tr></table>
 
