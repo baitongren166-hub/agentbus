@@ -10,6 +10,10 @@ import os
 import shutil
 import subprocess
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):  # Windows 控制台默认不是 UTF-8：打印中文会直接报错退出
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

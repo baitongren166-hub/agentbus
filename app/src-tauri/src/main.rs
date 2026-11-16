@@ -474,8 +474,12 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("agentbus 启动失败")
         .run(|app, e| {
+            // 点 Dock 图标重新打开主窗口：只有 macOS 有这个事件
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = e {
                 show_main(app, None);
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, e);
         });
 }

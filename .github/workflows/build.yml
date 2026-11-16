@@ -18,6 +18,8 @@ jobs:
           - { os: windows-latest, name: windows }
           - { os: ubuntu-22.04, name: linux }               # .deb + .AppImage
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"   # Windows 上 Python 默认不是 UTF-8，脚本里的中文会出错
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
