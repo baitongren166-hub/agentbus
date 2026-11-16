@@ -7,9 +7,19 @@ agentbus turns the agents already on your computer — Claude Code, Codex, Antig
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">中文</a></p>
 
-<p align="center"><a href="#install">Download</a> · <a href="#quick-start">Quick start</a> · <a href="#screenshots">Screenshots</a> · <a href="#how-is-this-different">Comparison</a></p>
+<p align="center"><a href="#install">Download</a> · <a href="#videos">Videos</a> · <a href="#quick-start">Quick start</a> · <a href="#screenshots">Screenshots</a> · <a href="#how-is-this-different">Comparison</a></p>
 
 <p align="center"><img src="docs/screenshots/en/hero.jpg" width="900" alt="The floating island expanded over the Base, where each teammate works at a desk in a pixel office"></p>
+
+## Videos
+
+<table><tr>
+<td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-concept.mp4"><img src="docs/videos/concept.jpg" alt="Concept film"></a><br><b>Concept film</b><br><sub>What if they were a team? · 1:32</sub></td>
+<td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-launch.mp4"><img src="docs/videos/launch.jpg" alt="Launch video"></a><br><b>Launch video</b><br><sub>Everything it does · 1:06</sub></td>
+<td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-demo.mp4"><img src="docs/videos/demo.jpg" alt="Walkthrough"></a><br><b>Walkthrough</b><br><sub>Real UI, step by step · 1:48</sub></td>
+</tr></table>
+
+<p align="center"><sub>Videos are in Chinese with the real app UI. Click a cover to download and watch.</sub></p>
 
 ## The problem
 

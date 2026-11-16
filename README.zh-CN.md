@@ -7,9 +7,19 @@ agentbus 把你电脑上已经装好的 agent —— Claude Code、Codex、Antig
 
 <p align="center"><a href="README.md">English</a> · <b>中文</b></p>
 
-<p align="center"><a href="#安装">下载</a> · <a href="#快速上手">快速上手</a> · <a href="#截图">截图</a> · <a href="#和已有项目有什么不同">对比</a></p>
+<p align="center"><a href="#安装">下载</a> · <a href="#视频">视频</a> · <a href="#快速上手">快速上手</a> · <a href="#截图">截图</a> · <a href="#和已有项目有什么不同">对比</a></p>
 
 <p align="center"><img src="docs/screenshots/zh/hero.jpg" width="900" alt="悬浮窗展开浮在基地上方，每位队员坐在像素办公室的工位上"></p>
+
+## 视频
+
+<table><tr>
+<td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-concept.mp4"><img src="docs/videos/concept.jpg" alt="概念片"></a><br><b>概念片</b><br><sub>如果，它们本该是一支团队？· 1:32</sub></td>
+<td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-launch.mp4"><img src="docs/videos/launch.jpg" alt="产品发布视频"></a><br><b>产品发布视频</b><br><sub>它能做的事 · 1:06</sub></td>
+<td align="center" width="33%"><a href="https://github.com/baitongren166-hub/agentbus/releases/download/v0.6.0/agentbus-demo.mp4"><img src="docs/videos/demo.jpg" alt="操作演示"></a><br><b>操作演示</b><br><sub>真实界面，一步步来 · 1:48</sub></td>
+</tr></table>
+
+<p align="center"><sub>点封面下载观看。</sub></p>
 
 ## 痛点
 
