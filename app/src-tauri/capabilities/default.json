@@ -1,0 +1,23 @@
+{
+  "identifier": "default",
+  "windows": [
+    "main",
+    "hud"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:8790/*"
+    ]
+  },
+  "permissions": [
+    "core:default",
+    "allow-hud-resize",
+    "allow-hud-front",
+    "allow-hud-visible",
+    "allow-open-main",
+    "allow-hud-pos",
+    "allow-hud-place",
+    "allow-hud-snap",
+    "allow-hud-through"
+  ]
+}

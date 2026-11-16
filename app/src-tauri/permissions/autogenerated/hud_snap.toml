@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hud-snap"
+description = "Enables the hud_snap command without any pre-configured scope."
+commands.allow = ["hud_snap"]
+
+[[permission]]
+identifier = "deny-hud-snap"
+description = "Denies the hud_snap command without any pre-configured scope."
+commands.deny = ["hud_snap"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hud-pos"
+description = "Enables the hud_pos command without any pre-configured scope."
+commands.allow = ["hud_pos"]
+
+[[permission]]
+identifier = "deny-hud-pos"
+description = "Denies the hud_pos command without any pre-configured scope."
+commands.deny = ["hud_pos"]

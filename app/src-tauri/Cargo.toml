@@ -1,0 +1,15 @@
+[package]
+name = "agentbus"
+version = "0.6.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

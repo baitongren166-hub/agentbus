@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "resources": {
+      "../../build/ui-stage/": "ui/",
+      "../../build/dist/agentbus-core/": "core-bin/"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hud-place"
+description = "Enables the hud_place command without any pre-configured scope."
+commands.allow = ["hud_place"]
+
+[[permission]]
+identifier = "deny-hud-place"
+description = "Denies the hud_place command without any pre-configured scope."
+commands.deny = ["hud_place"]

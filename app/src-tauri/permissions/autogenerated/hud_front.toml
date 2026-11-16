@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hud-front"
+description = "Enables the hud_front command without any pre-configured scope."
+commands.allow = ["hud_front"]
+
+[[permission]]
+identifier = "deny-hud-front"
+description = "Denies the hud_front command without any pre-configured scope."
+commands.deny = ["hud_front"]
