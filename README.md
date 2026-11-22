@@ -3,7 +3,7 @@
 <h1 align="center">agentbus</h1>
 
 <p align="center"><b>Stop being the messenger between your AI windows.</b><br>
-agentbus turns the agents already on your computer — Claude Code, Codex, Antigravity, ZCode, OpenCode, WorkBuddy, any OpenAI-compatible API — into one team that works together. One <b>lead</b> plans, teammates work in parallel with their own local abilities, finished jobs report back automatically, and every job is billed against your real quota.</p>
+agentbus turns the agents already on your computer — Codex, Antigravity, ZCode, OpenCode, WorkBuddy, any OpenAI-compatible API — into one team that works together. One <b>lead</b> plans, teammates work in parallel with their own local abilities, finished jobs report back automatically, and every job is billed against your real quota.</p>
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">中文</a></p>
 
@@ -57,7 +57,7 @@ Every teammate is a chibi character at a desk in a cozy pixel office. They doze 
 `@teammate` in a channel dispatches a job; a teammate whose reply `@`s someone else hands the work on — no need for you to pass messages along. Group-talk mode lets teammates discuss in turns, and long history is compressed into notes automatically.
 
 ### Billing and safety rails
-Time, subscription quota and money are recorded for every job. When a subscription quota runs out, agentbus stops instead of quietly spending paid credits. A watchdog restarts a teammate that has gone quiet. Claude is **sealed** by default (never dispatched, never billed) and can be unsealed in its teammate page.
+Time, subscription quota and money are recorded for every job. When a subscription quota runs out, agentbus stops instead of quietly spending paid credits. A watchdog restarts a teammate that has gone quiet. Claude is permanently sealed in AgentBus.
 
 ## Screenshots
 
@@ -76,7 +76,7 @@ Time, subscription quota and money are recorded for every job. When a subscripti
 
 | Agent | How jobs run | Quota / cost |
 |---|---|---|
-| Claude Code | Lead; sealed as a teammate by default (unseal in its page) | Local token usage |
+| Claude Code | Permanently sealed in AgentBus | — |
 | Codex CLI (GPT) | `codex exec` | 5-hour / weekly subscription quota |
 | Antigravity | `agy -p` | Per-model quota read from the Antigravity app |
 | OpenCode, ZCode, DeepSeek Harness | CLI | DeepSeek balance |
@@ -127,7 +127,7 @@ The desktop app (island, menu bar) is built with Tauri: `cd app && npm ci && npx
 
 1. Open agentbus. On first launch it looks at which agents you have, sets up a lineup and starts a short tour.
 2. Open a conversation in any agent you use and send a message — the island asks whether to join. Click **Connect**.
-   (Or register the MCP server once: `claude mcp add --scope user agentbus -- python3 ~/agentbus/core/mcp_server.py`.)
+   For manual setup in a supported client, register the `agentbus` MCP server with command `python3` and argument `~/agentbus/core/mcp_server.py`.
 3. Talk to your lead in plain language:
    - "Who's in the office and how much quota is left?"
    - "At the same time: have GPT make three illustrations and Antigravity write the copy. Tell me when both are done."

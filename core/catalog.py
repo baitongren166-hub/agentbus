@@ -69,7 +69,7 @@ KNOWN_AGENTS = {
     "codebuddy": {"name": "WorkBuddy", "caps": ["files", "code", "cn"], "abbr": "WB", "vendor": "腾讯", "bin": "codebuddy", "run": "codebuddy", "acts": None,
                   "billing": "none", "sprite": None, "color": "#14b8a6", "desc": "CodeBuddy Code CLI（WorkBuddy 同源），需要另装"},
     "doubao":   {"name": "豆包", "caps": ["cn", "web", "cheap"], "abbr": "豆", "vendor": "字节跳动", "bin": None, "run": "doubao", "acts": None,
-                 "billing": "free", "sprite": None, "color": "#25a5f0", "desc": "豆包电脑版，走豆包遥控（调试端口 9225）"},
+                 "billing": "free", "sprite": None, "color": "#25a5f0", "desc": "豆包 Headless CLI，使用独立登录的账号在云端执行"},
     "qwen":     {"name": "Qwen Code", "caps": ["files", "code", "cn", "cheap"], "abbr": "Q", "vendor": "阿里", "bin": "qwen", "run": "generic", "acts": None,
                  "billing": "none", "sprite": None, "color": "#615ced", "desc": "qwen -p", "cmd": ["qwen", "-p", "{prompt}"]},
     "kimi":     {"name": "Kimi CLI", "caps": ["files", "code", "long", "cn"], "abbr": "K", "vendor": "月之暗面", "bin": "kimi", "run": "generic", "acts": None,
@@ -80,7 +80,6 @@ KNOWN_AGENTS = {
 
 # 一键打开：桌面端（/Applications 里的 App 名，或网页地址）和命令行
 OPENERS = {
-    "claude": {"app": "Claude", "cli": "claude"},
     "codex": {"app": "ChatGPT", "cli": "codex"},
     "opencode": {"app": "OpenCode", "cli": "opencode"},
     "zcode": {"app": "ZCode", "cli": "zcode"},

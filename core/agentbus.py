@@ -25,6 +25,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,8 +34,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import quota  # noqa: E402
 from catalog import CATEGORIES, LEVELS  # noqa: E402
-from config import (HOME, update_json, agents_dict, bill, doubao_remote, installed, ledger_add, ledger_read, load_config,  # noqa: E402
-                    load_json, now, project, resolve_tag, save_config, save_json, set_batch, who)
+from config import (CLAUDE_SEALED, HOME, URL, DISPATCH_RULE, update_json, agents_dict, bill, dispatch_backend, doubao_cli_cmd, installed, ledger_add, ledger_read, load_config,  # noqa: E402
+                    load_json, now, project, resolve_tag, save_config, save_json, sealed, set_batch, who)
 
 MAX_DEPTH = 2  # agent 再派活给别的 agent 最多两层，防止互相踢皮球
 RUNNING = HOME / "running"
@@ -114,6 +115,7 @@ def build_prompt(agent, name, root, bus, task, sender, pb_block=""):
     parts.append(f"""## 协作方式
 - 项目目录：{root}
 - 卡住了、要别人拍板，或者想把一块杂活转给别的 agent：`agentbus ask <agent> "..."`（agent 可选：{others}）；只留言不等回复：`agentbus post <agent> "..." --from {agent}`
+- 派活方式：{DISPATCH_RULE}
 - 要用户本人做的事（登录、付款、手机实拍）不要硬做，在最终回复里写清楚{lesson_hint}
 - 最终回复只写：做了什么、产出文件的完整路径、没做完/有疑问的地方。不要客套""")
     parts.append("## 这次的任务\n" + task)
@@ -135,41 +137,83 @@ def load_json_str(s):
         return {}
 
 
+def codebuddy_result(stdout):
+    from jobs import codebuddy_terminal
+
+    whole = load_json_str(stdout)
+    if isinstance(whole, dict) and (whole.get("type") == "result" or "result" in whole):
+        return whole
+    return codebuddy_terminal(reversed(whole if isinstance(whole, list) else list(_events(stdout))))
+
+
 class Stalled(Exception):
     """agent 太久没动静（没有新输出、自己的会话日志也不再更新）。"""
 
 
 # 只在结束时才输出结果的 agent，用它自己的会话日志判断还活着没
-# 看门狗除了看 stdout，还看这次派活自己的会话日志在不在动（只认这次开工后新建的、或者续的那个会话的文件，
-# 不能用整个目录——主位自己的对话也在往那里写，会把卡死的活一直“续命”）
-ACTIVITY_LOGS = {"zcode": "~/.zcode/cli/rollout/model-io-*.jsonl", "codex": "~/.codex/sessions/*/*/*/rollout-*.jsonl"}
+# 看门狗只认与派活会话号相符的日志，避免把其他窗口的活动算进来。
+ACTIVITY_LOGS = {"zcode": "~/.zcode/cli/rollout/model-io-*.jsonl", "codex": "~/.codex/sessions/*/*/*/rollout-*.jsonl",
+                 "agy": "~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl"}  # 反重力 -p json 跑完才输出，只能看它的会话记录
 
 
-def watchdog_cfg():
+def watchdog_cfg(kind=None):
+    """看门狗的起步时限（分钟）和重试次数。idle_min 可以是一个数，也可以按执行器分：{"default": 10, "agy": 20}。
+    这只是起步值：_run 里还会看进程组的 CPU、按这单自己出现过的最长安静间隔往上放宽，不是死线。"""
     w = load_config().get("watchdog") or {}
-    return float(os.environ.get("AGENTBUS_IDLE_MIN") or w.get("idle_min", 10)), int(os.environ.get("AGENTBUS_RETRIES") or w.get("retries", 1))
+    idle = w.get("idle_min", 10)
+    if isinstance(idle, dict):
+        idle = idle.get(kind) or idle.get("default", 10)
+    return float(os.environ.get("AGENTBUS_IDLE_MIN") or idle), int(os.environ.get("AGENTBUS_RETRIES") or w.get("retries", 1))
 
 
-def _own_log_probe(kind, session, t0):
+def _group_cpu(pgid):
+    """执行器整个进程组累计用了多少 CPU 秒（拿不到就 None）。在跑命令、编译、转码时它会涨，说明没卡死。"""
+    if pf_is_win():
+        return None
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pgid=,time="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    total = 0.0
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or parts[0] != str(pgid):
+            continue
+        t = parts[1].replace("-", ":").split(":")  # [[dd-]hh:]mm:ss.xx
+        try:
+            secs = [float(x) for x in t]
+        except ValueError:
+            continue
+        mult = [1, 60, 3600, 86400]
+        total += sum(v * mult[i] for i, v in enumerate(reversed(secs)))
+    return total
+
+
+def _own_log_probe(kind, session):
     """返回一个函数：这次派活自己的会话日志最近一次更新的时间（没有就 0）。"""
     import glob
     pattern = ACTIVITY_LOGS.get(kind)
-    if not pattern:
-        return lambda: 0
+    if not pattern or not session:
+        none = lambda: 0  # noqa: E731
+        none.mine = set()
+        return none
     mine = set()
 
     def probe():
+        latest = 0
         for f in glob.glob(os.path.expanduser(pattern)):
-            if f in mine:
+            path = Path(f)
+            if session not in path.parts and path.stem not in (session, "model-io-" + session) and not (
+                kind == "codex" and path.stem.endswith("-" + session)
+            ):
                 continue
             try:
-                st = os.stat(f)
+                latest = max(latest, path.stat().st_mtime)
             except OSError:
                 continue
-            born = getattr(st, "st_birthtime", st.st_ctime)
-            if (session and session in os.path.basename(f)) or born >= t0 - 2:
-                mine.add(f)
-        return max((os.path.getmtime(f) for f in mine if os.path.exists(f)), default=0)
+            mine.add(f)
+        return latest
+    probe.mine = mine
     return probe
 
 
@@ -182,6 +226,28 @@ class _NoStart(Exception):
     """排完队发现不能开工（比如额度用完会扣付费 credits）：不跑，直接收尾写回复。"""
 
 
+class DispatchBlocked(Exception):
+    def __init__(self, code, detail="", session=None):
+        super().__init__(detail)
+        self.code = code
+        self.session = session
+
+
+def cli_result(result, kind=None):
+    """认证失败有时也会返回退出码 0（例如 CodeBuddy）。"""
+    stdout = result.stdout.strip()
+    error_result = codebuddy_result(stdout) if kind == "codebuddy" else (load_json_str(stdout) if '"is_error"' in stdout else {})
+    if result.returncode or not stdout or (isinstance(error_result, dict) and error_result.get("is_error") is True):
+        output = str(error_result.get("result") or error_result.get("error") or "") if kind == "codebuddy" and error_result else stdout
+        detail = "\n".join(s for s in (result.stderr.strip(), output) if s)
+        if re.search(r"not logged in|not signed in|login[_ ](?:is )?required|authentication (?:required|failed)|"
+                     r"please (?:log in|login|sign in|use /login)|(?:请先|尚未|未)登录|invalid_grant", detail, re.I):
+            raise DispatchBlocked("cli_login", detail[:800])
+        if result.returncode in (126, 127) and re.search(r"command not found|exec format error|no such file or directory", result.stderr, re.I):
+            raise DispatchBlocked("cli_unavailable", result.stderr.strip()[:800])
+    return result
+
+
 _CUR = {}  # 这次派活的 running 记录路径（_run 往里登记执行器进程）
 
 
@@ -190,21 +256,34 @@ def _sigterm(*_):
 
 
 def _run(kind, cmd, input=None, cwd=None, env=None, capture_output=True, text=True, session=None):
-    """像 subprocess.run 一样跑 agent，但边跑边看它有没有动静：超过 idle_min 分钟没有任何新输出，
-    自己的会话日志也没更新，就整组杀掉、抛 Stalled，由 cmd_ask 开新会话重试。"""
+    """像 subprocess.run 一样跑 agent，但边跑边看它有没有动静。动静有三种：新输出、自己的会话日志更新、
+    进程组 CPU 在涨。三样都停了才开始算安静；安静时限从 watchdog_cfg 的起步值开始，
+    这单里出现过多长的安静又自己恢复了，时限就放宽到它的 2 倍（慢的 agent 不会被误杀）。
+    超过时限才整组杀掉、抛 Stalled，由 cmd_ask 开新会话重试。"""
     import tempfile
     import pf
-    idle_min, _ = watchdog_cfg()
+    if sealed({"run": kind, "cmd": cmd}):
+        raise DispatchBlocked("sealed", CLAUDE_SEALED)
+    idle_min, _ = watchdog_cfg(kind)
     cmd = pf.resolve(cmd)
-    out = tempfile.TemporaryFile("w+", encoding="utf-8")
+    live = _CUR.get("live")  # 输出实时写进这单自己的文件：界面上边跑边看它在干什么（几轮补充接着往后写）
+    out = open(live, "a+", encoding="utf-8") if live else tempfile.TemporaryFile("w+", encoding="utf-8")
+    out.seek(0, 2)
+    start_at = out.tell()
     err = tempfile.TemporaryFile("w+", encoding="utf-8")
-    p = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                         stdout=out, stderr=err, text=True, **pf.group_kwargs())
+    try:
+        p = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                             stdout=out, stderr=err, text=True, **pf.group_kwargs())
+    except OSError as e:
+        out.close()
+        err.close()
+        if e.filename == cmd[0]:
+            raise DispatchBlocked("cli_unavailable", str(e)) from e
+        raise
     try:  # 从起进程那一刻就在保护里：登记途中被喊停也会把执行器整组停掉
         if _CUR.get("running"):  # 登记实际执行器的进程组：停止时连它一起停（它和外层不在同一组）
             try:
-                rec = dict(load_json(_CUR["running"], {}), worker=p.pid)
-                save_json(_CUR["running"], rec)
+                rec = update_json(_CUR["running"], lambda row: row.update(worker=p.pid, logs=[], session=session, out_offset=start_at))
                 if rec.get("cancel"):  # 登记前主人已经点了停止
                     raise KeyboardInterrupt
             except OSError:
@@ -223,34 +302,142 @@ def _run(kind, cmd, input=None, cwd=None, env=None, capture_output=True, text=Tr
             except (BrokenPipeError, OSError, ValueError):
                 pass
         threading.Thread(target=feed, daemon=True).start()
-    last, sizes = time.time(), (0, 0)
-    own_log = _own_log_probe(kind, session, last)
+    last, sizes = time.time(), (start_at, 0)
+    bound_session = session
+    own_log = _own_log_probe(kind, session)
+    logged = set()
+    limit = idle_min * 60  # 起步时限，下面按这单的实际节奏放宽
+    cpu, cpu_t = None, 0.0
     try:
         while p.poll() is None:
             time.sleep(2 if time.time() - last < 60 else 10)
+            if p.poll() is not None:
+                break
+            prev = last
             now_sizes = (os.fstat(out.fileno()).st_size, os.fstat(err.fileno()).st_size)
             if now_sizes != sizes:
+                if not bound_session and live and kind in ACTIVITY_LOGS and now_sizes[0] > sizes[0]:
+                    from jobs import session_of
+                    bound_session = session_of({"out": str(live), "kind": kind, "out_offset": start_at})
+                    if bound_session:
+                        own_log = _own_log_probe(kind, bound_session)
+                        if _CUR.get("running"):
+                            update_json(_CUR["running"], lambda row: row.update(session=bound_session))
                 sizes, last = now_sizes, time.time()
             last = max(last, own_log())
-            if time.time() - last > idle_min * 60:
-                raise Stalled(f"{max(1, round((time.time() - last) / 60))} 分钟没有任何动静")
+            if own_log.mine - logged and _CUR.get("running"):  # 找到了它这单自己的会话日志：登记上，界面从这里读过程
+                logged = set(own_log.mine)
+                try:
+                    update_json(_CUR["running"], lambda row: row.update(logs=sorted(logged)))
+                except OSError:
+                    pass
+            if time.time() - cpu_t >= 30:  # CPU 30 秒查一次就够
+                cpu_t, now_cpu = time.time(), _group_cpu(p.pid)
+                if now_cpu is not None and cpu is not None and now_cpu - cpu > 1:
+                    last = time.time()
+                cpu = now_cpu if now_cpu is not None else cpu
+            if last > prev:  # 安静了一段又有动静：这单本来就会这么久不出声，时限放宽到这段的 2 倍
+                limit = max(limit, (last - prev) * 2)
+            if time.time() - last > limit:
+                raise Stalled(f"{max(1, round((time.time() - last) / 60))} 分钟没有任何动静（新输出、会话日志、CPU 都没变）")
     except BaseException:  # 卡住、被喊停、任何意外：先把执行器整组停掉再往外抛，不留野进程
         pf.kill_tree(p)
         p.wait()
+        out.close()
+        err.close()
         raise
-    out.seek(0)
+    out.seek(start_at)
     err.seek(0)
-    return subprocess.CompletedProcess(cmd, p.returncode, out.read(), err.read())
+    res = subprocess.CompletedProcess(cmd, p.returncode, out.read(), err.read())
+    out.close()
+    err.close()
+    return cli_result(res, kind)
+
+
+def _run_doubao(root, prompt, session, run_file, env):
+    """先拿到受理回执，再按会话和任务 ID 等待，避免超时后重复提交。"""
+    import pf
+    cmd = doubao_cli_cmd()
+    if not cmd:
+        return "（豆包没开工：找不到 doubao-cli，请安装后重试。）", session, "", None
+    env = dict(env, DOUBAO_CLI_DISABLE_AUTO_UPDATE="1")
+    prefix = [*cmd, "sessions"]
+    submit = [*prefix, "send", session] if session else [*prefix, "create", "--mode", "work"]
+    submit += ["--runtime", "cloud", "--timeout", "60", "--json"]
+    if len(prompt.encode("utf-8")) > min(pf.ARG_LIMIT, 100_000):
+        attachment = run_file.with_suffix(".prompt.md")
+        attachment.parent.mkdir(parents=True, exist_ok=True)
+        attachment.write_text(prompt, "utf-8")
+        submit += ["--attach", str(attachment)]
+        prompt = "请读取附上的任务书全文并按要求完成。"
+
+    log = []
+
+    def call(args, active_session=None):
+        result = _run("doubao", args, cwd=root, env=env, capture_output=True, text=True, session=active_session)
+        value = load_json_str(result.stdout)
+        if not isinstance(value, dict):
+            value = {}
+        fields = ("platform", "accepted", "conversationId", "runId", "status", "reply", "error", "message")
+        event = {k: value[k] for k in fields if k in value}
+        error = str(value.get("message") or result.stderr).strip()[:500]
+        if result.returncode and error:
+            event.setdefault("platform", "headless")
+            event.setdefault("message", error)
+        if event:
+            log.append(json.dumps(event, ensure_ascii=False))
+        return value, error
+
+    try:
+        receipt, error = call([*submit, "--", prompt], session)
+    except Stalled:
+        return "（豆包提交超时：没有拿到回执，请先核对豆包里的任务状态。）", session, "", None
+    sid, turn = receipt.get("conversationId"), receipt.get("runId")
+    if not (receipt.get("accepted") is True and isinstance(sid, str) and sid and isinstance(turn, str) and turn):
+        if receipt.get("error") == "login_required" or "login is required" in error.lower():
+            error = "请在 AgentBus 队员页打开「登录豆包 Headless」，用手机豆包扫码。"
+        return f"（豆包没接上：{error or '未取得任务回执，请先核对豆包里的任务状态。'}）", session, "\n".join(log), None
+
+    if _CUR.get("running"):
+        update_json(_CUR["running"], lambda current: current.update(session=sid, doubao_run=turn))
+    try:
+        result, error = call([*prefix, "wait", sid, "--run", turn, "--timeout", "900", "--json"], sid)
+    except Stalled:
+        result, error = {}, "等待超时"
+    except DispatchBlocked as e:
+        raise DispatchBlocked(e.code, f"会话 {sid}，任务 {turn} 已受理，请查询原任务。{e}", sid) from e
+    status = result.get("status")
+    reply = result.get("reply")
+    answer = reply.get("text") if isinstance(reply, dict) else None
+    if (status == "completed" and result.get("conversationId") == sid and result.get("runId") == turn
+            and isinstance(answer, str) and answer.strip()):
+        return answer.strip(), sid, "\n".join(log), None
+    why = {"waiting_input": "等待用户在豆包里确认", "completed": "没有回复"}.get(status, error or status or "未返回结果")
+    text = f"（豆包没做完：{why}。会话 {sid}，任务 {turn}。）"
+    return text, sid, "\n".join(log), None
 
 
 def run_agent(agent_id, a, root, prompt, session, run_file):
     """跑一次 agent，返回 (回复文本, 新会话 id, 原始输出, token 用量)。"""
+    if sealed(a) or sealed(agent_id):
+        raise DispatchBlocked("sealed", CLAUDE_SEALED)
     import brains
-    brain = brains.chosen(load_config(), agent_id)  # 主人给这个队员（分身）选的模型和思考强度
+    brain = brains.chosen(load_config(), agent_id)  # 主人给这个队员（分身）选的模型和思考强度——每次开工现读，战备里改了下一单就生效
+    used = " ".join(x for x in (brain.get("model"), brain.get("effort") and f"强度 {brain['effort']}") if x) or "它自己的默认"
+    if brain and a["run"] in ("dsh", "doubao", "generic", "codebuddy") and not brains.generic_flags(a.get("bin") or "", brain):
+        used = "它自己的默认（它的命令行不支持换模型）"
+    if _CUR.get("brain") != used:
+        _CUR["brain"] = used
+        print(f"[agentbus] {a['name']} 这单用：{used}（战备里选的）", file=sys.stderr, flush=True)
+        if _CUR.get("running"):
+            try:
+                update_json(_CUR["running"], lambda row: row.update(brain=used))
+            except OSError:
+                pass
     env = dict(os.environ, PWD=str(root), AGENTBUS_SELF=agent_id, AGENTBUS_DEPTH=str(int(os.environ.get("AGENTBUS_DEPTH", "0")) + 1), AGENTBUS_CONV=conv_id())
     kind = a["run"]
     import pf
-    if len(prompt) > pf.ARG_LIMIT and kind not in ("codex", "claude", "api"):
+    if len(prompt) > pf.ARG_LIMIT and kind not in ("codex", "claude", "api", "doubao"):
         # Windows 上命令行参数有长度上限：长任务书写成文件，参数里只放一句“去读它”
         pf_file = run_file.with_suffix(".prompt.md")
         pf_file.parent.mkdir(parents=True, exist_ok=True)
@@ -258,11 +445,14 @@ def run_agent(agent_id, a, root, prompt, session, run_file):
         prompt = f"完整任务书在 {pf_file}，先完整读一遍，再按里面的要求开工。"
     if kind == "codex":
         out = run_file.with_suffix(".last.md")
+        out.unlink(missing_ok=True)
         base = ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--json", "-o", str(out)] + brains.flags("codex", brain)
         cmd = ["codex", "exec", "resume", session, *base, "-"] if session else ["codex", "exec", *base, "-"]
         p = _run(kind, cmd, input=prompt, cwd=root, env=env, capture_output=True, text=True, session=session)
         sid, tok, errs = session, {"input": 0, "output": 0, "cache": 0}, []
+        failed = False
         for ev in _events(p.stdout):
+            failed = failed or ev.get("type") == "turn.failed"
             if ev.get("type") in ("error", "turn.failed"):  # 额度、网络、工具被拦这类：把原因带回给主位
                 er = ev.get("error") if isinstance(ev.get("error"), dict) else {}
                 errs.append(er.get("message") or ev.get("message") or str(ev)[:200])
@@ -274,31 +464,38 @@ def run_agent(agent_id, a, root, prompt, session, run_file):
                 tok["cache"] += u.get("cached_input_tokens", 0)
                 tok["output"] += u.get("output_tokens", 0)
         text = out.read_text("utf-8").strip() if out.exists() else ""
-        if not text and errs:
-            return f"（codex 出错：{'；'.join(dict.fromkeys(errs))[:600]}）", sid, p.stdout, tok
+        if failed or p.returncode or (not text and errs):
+            detail = "；".join(dict.fromkeys(errs)) or (p.stderr or "").strip() or f"退出码 {p.returncode}"
+            return f"（codex 出错：{detail[:600]}）", sid, p.stdout, tok
         return text or f"（codex 没有回复，退出码 {p.returncode}）\n{p.stderr[-2000:]}", sid, p.stdout, tok
-    if kind == "agy":  # 反重力 CLI：-p 单次执行，--output-format json 一次性返回 {conversation_id, status, response, usage}
-        cmd = ["agy", "-p", prompt, "--output-format", "json", "--dangerously-skip-permissions"]
+    if kind == "agy":  # 反重力 CLI：-p 单次执行，stream-json 边跑边吐每一步（init 带会话号，最后一条 result 和 json 格式的结果一样）
+        cmd = ["agy", "-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions"] + brains.flags("agy", brain)
         if session:
             cmd += ["--conversation", session]
-        p = _run(kind, cmd, cwd=root, env=env, capture_output=True, text=True)
-        try:
-            d = json.loads((p.stdout or "").strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            return f"（反重力没有回复，退出码 {p.returncode}）\n{(p.stderr or '')[-1500:]}", session, p.stdout, None
+        p = _run(kind, cmd, cwd=root, env=env, capture_output=True, text=True, session=session)
+        d, sid, said = None, session, ""
+        for ev in _events(p.stdout):
+            if ev.get("event") == "init":
+                sid = ev.get("conversation_id") or sid
+            elif ev.get("event") == "step_update" and (ev.get("step_update") or {}).get("step_type") == "agent_response":
+                said += (ev["step_update"].get("text_delta") or "")
+            elif ev.get("event") == "result":
+                d = ev.get("result") or {}
+        if d is None:  # 没跑完（被停下、出错）：有说过的话就先交这些
+            return (said.strip() or f"（反重力没有回复，退出码 {p.returncode}）\n{(p.stderr or '')[-1500:]}"), sid, p.stdout, None
         u = d.get("usage") or {}
         tok = {"input": int(u.get("input_tokens") or 0), "output": int(u.get("output_tokens") or 0) + int(u.get("thinking_tokens") or 0),
                "cache": int(u.get("cache_read_tokens") or 0)}
         text = (d.get("response") or "").strip()
         if d.get("status") not in (None, "SUCCESS") and not text:
             text = f"（反重力出错：{d.get('status')}）"
-        return text or "（反重力没有回复）", d.get("conversation_id") or session, p.stdout, tok
+        return text or "（反重力没有回复）", d.get("conversation_id") or sid, p.stdout, tok
     if kind == "opencode":
         model = brains.opencode_model(brain, os.environ.get("AGENTBUS_DEEPSEEK_MODEL", "deepseek/deepseek-flash"))
         cmd = ["opencode", "run", "-m", model, "--format", "json", "--auto"]
         if session:
             cmd += ["--session", session]
-        p = _run(kind, cmd + [prompt], cwd=root, env=env, capture_output=True, text=True)
+        p = _run(kind, cmd + [prompt], cwd=root, env=env, capture_output=True, text=True, session=session)
         sid, texts, tok, errs = session, [], {"input": 0, "output": 0, "cache": 0}, []
         for ev in _events(p.stdout):
             sid = ev.get("sessionID") or sid
@@ -331,53 +528,50 @@ def run_agent(agent_id, a, root, prompt, session, run_file):
                    "cache": u.get("cacheReadTokens", 0)}
             return str(whole["response"]).strip(), whole.get("sessionId") or session, p.stdout, tok
         return (p.stdout.strip()[-3000:] or f"（zcode 没有回复，退出码 {p.returncode}）\n{p.stderr[-2000:]}"), session, p.stdout, None
-    if kind == "claude":
-        cmd = ["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions"] + brains.flags("claude", brain)
-        if session:
-            cmd += ["--resume", session]
-        p = _run(kind, cmd, input=prompt, cwd=root, env=env, capture_output=True, text=True)
-        res = load_json_str(p.stdout)
-        u = res.get("usage") or {}
-        tok = {"input": u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0),
-               "output": u.get("output_tokens", 0), "cache": u.get("cache_read_input_tokens", 0),
-               "usd_equiv": res.get("total_cost_usd")}
-        return (res.get("result") or f"（claude 没有回复，退出码 {p.returncode}）\n{p.stderr[-2000:]}"), \
-            res.get("session_id", session), p.stdout, tok
     if kind == "api":
         import api_agent
         try:
             text, sid, raw, tok = api_agent.run(a["account"], brain.get("model") or a["model"], prompt, root, session, brain.get("effort"),
-                                                timeout=watchdog_cfg()[0] * 60 * 3, bus=run_file.parent.parent, me=agent_id)
+                                                timeout=watchdog_cfg("api")[0] * 60 * 3, bus=run_file.parent.parent, me=agent_id)
         except api_agent.ApiError as e:
             return f"（{a['name']} 调用出错：{e}）", session, "", None
         return text, sid, raw, tok
     if kind == "dsh":
-        p = _run(kind, ["dsh", "--profile", "headless", prompt], cwd=root, env=env, capture_output=True, text=True)
-        return (p.stdout.strip() or f"（DeepSeek Harness 没有回复，退出码 {p.returncode}）\n{p.stderr[-2000:]}"), session, p.stdout, None
+        p = _run(kind, ["dsh", "--profile", "headless", *brains.generic_flags(a.get("bin") or "dsh", brain), prompt], cwd=root, env=env, capture_output=True, text=True)
+        return _plain_cli_reply(a, p), session, p.stdout, None
     if kind == "codebuddy":
-        cmd = ["codebuddy", "-p", "-y", "--output-format", "json"]
+        cmd = ["codebuddy", "-p", "-y", "--verbose", "--output-format", "stream-json"] + brains.generic_flags(a.get("bin") or "codebuddy", brain)
         if session:
             cmd += ["--resume", session]
-        p = _run(kind, cmd + [prompt], cwd=root, env=env, capture_output=True, text=True)
-        res = load_json_str(p.stdout)
-        if isinstance(res, dict) and res.get("result"):
-            return res["result"], res.get("session_id", session), p.stdout, None
-        return (p.stdout.strip() or f"（WorkBuddy 没有回复，退出码 {p.returncode}）\n{p.stderr[-2000:]}"), session, p.stdout, None
+        p = _run(kind, cmd + [prompt], cwd=root, env=env, capture_output=True, text=True, session=session)
+        res = codebuddy_result(p.stdout)
+        from jobs import event_session
+        sid = res.get("session_id") or event_session(_events(p.stdout), "codebuddy") or session
+        if p.returncode == 0 and not res.get("is_error") and res.get("result"):
+            return res["result"], sid, p.stdout, None
+        detail = res.get("result") or res.get("error")
+        if not res:
+            summary = f"CodeBuddy CLI 提前退出，未返回最终结果，退出码 {p.returncode}"
+        else:
+            summary = f"CodeBuddy CLI 执行出错或没有回复，退出码 {p.returncode}"
+        diagnostic = str(detail or p.stderr).strip()
+        reply = f"（{summary}）" + (f"\n{diagnostic[-2000:]}" if diagnostic else "")
+        return reply, sid, p.stdout, None
     if kind == "doubao":
-        # 豆包没有官方 CLI，用我们的豆包遥控（CDP）：填进输入框 → 发送 → 等它答完 → 读回复
-        js = doubao_remote()
-        log = []
-        for step in (["输入", prompt], ["发送"], ["等完", "900"], ["读", "6000"]):
-            p = _run(kind, ["node", js, *step], cwd=root, env=env, capture_output=True, text=True)
-            log.append(f"$ 豆包遥控 {step[0]}\n{p.stdout}{p.stderr}")
-            if p.returncode:
-                return f"（豆包没接上：{p.stdout.strip() or p.stderr.strip()}）", session, "\n".join(log), None
-        return p.stdout.strip(), session, "\n".join(log), None
+        return _run_doubao(root, prompt, session, run_file, env)
     if kind == "generic":
         cmd = [x.replace("{prompt}", prompt) for x in a["cmd"]]
+        cmd = cmd[:1] + brains.generic_flags(a.get("bin") or cmd[0], brain) + cmd[1:]
         p = _run(kind, cmd, cwd=root, env=env, capture_output=True, text=True)
-        return (p.stdout.strip() or f"（{a['name']} 没有回复，退出码 {p.returncode}）\n{p.stderr[-2000:]}"), session, p.stdout, None
+        return _plain_cli_reply(a, p), session, p.stdout, None
     sys.exit(f"{a['name']} 不能用命令行派活（{a.get('desc', '')}）")
+
+
+def _plain_cli_reply(agent, result):
+    if result.returncode:
+        detail = (result.stderr.strip() or result.stdout.strip())[-2000:]
+        return f"（执行出错：{agent['name']} 的 CLI 退出码为 {result.returncode}）\n{detail}".strip()
+    return result.stdout.strip() or f"（没有回复：{agent['name']} 的 CLI 未返回内容）"
 
 
 def inbox(bus, agent, mark=False):
@@ -431,21 +625,20 @@ def cmd_ask(a):
         cfg["jobs"] = own.get("jobs") or cfg["jobs"]
     # 职能：--tag，或者环境变量 AGENTBUS_TAG（派活脚本、主位在 Bash 里这样传）
     agent_id, tag = a.agent, a.tag or os.environ.get("AGENTBUS_TAG") or None
+    if agent_id not in agents:
+        agent_id = next((k for k, agent in agents.items() if agent_id.casefold() in (k.casefold(), agent["name"].casefold())), agent_id)
     if agent_id not in agents:  # 写的是岗位：按偏好挑人
         key, label = resolve_tag(agent_id)
-        from config import sealed
-        cands = [c for c in who(cfg, label) if agents[c["id"]].get("run") and not sealed(agents[c["id"]], cfg) and installed(agents[c["id"]])] if key.startswith("tag:") else []
+        cands = [c for c in who(cfg, label) if not sealed(agents[c["id"]], cfg) and dispatch_backend(agents[c["id"]])] if key.startswith("tag:") else []
         if not cands:
             sys.exit(f"没有能干「{label}」的 agent。先用 agentbus assign 给谁挂上这个岗位，或者直接写 agent 名字。")
         agent_id, tag = cands[0]["id"], tag or label
         print(f"[agentbus] 「{label}」按偏好派给 {agents[agent_id]['name']}"
               + ("" if cands[0]["in_office"] else "（办公室战备里没人能干，从休息室调的）"), file=sys.stderr)
     ag = agents[agent_id]
-    from config import sealed
-    if sealed(ag, cfg):  # Claude 默认封印：只当主位、不接派活；主人在队员页解封后才能派
-        sys.exit("Claude 已封印，不接派活：这件事主位自己做，或者派给别的队员（要让 Claude 当队员，先在 agentbus 队员页给它解封）。")
-    if ag.get("billing") == "manual":
-        sys.exit(f"{ag['name']} 现在是网页版（没装命令行），没法派活；请你自己把任务贴给它，或者先在 agentbus 里招募安装。")
+    if sealed(ag, cfg):
+        sys.exit(CLAUDE_SEALED)
+    backend = dispatch_backend(ag)
     task = sys.stdin.read() if a.task == "-" else a.task
     if a.file:
         task += "\n\n" + Path(a.file).read_text("utf-8")
@@ -492,6 +685,7 @@ def cmd_ask(a):
     RUNNING.mkdir(parents=True, exist_ok=True)
     running = RUNNING / (run_file.name + ".json")
     _CUR["running"] = running
+    _CUR["live"] = run_file.with_suffix(".live")
     if not pf_is_win():
         import signal
         signal.signal(signal.SIGTERM, _sigterm)
@@ -499,7 +693,8 @@ def cmd_ask(a):
     first = task.split("\n")[0][:80]
     # 先登记“在跑”（界面、agentbus wait 马上能看到），再去查额度（查余额要几秒）
     save_json(running, {"id": run_id, "agent": agent_id, "billing": billing, "project": name, "start": t0, "conv": conv[:12],
-                        "task": first, "title": (getattr(a, "title", None) or "").strip()[:40] or short_title(a.task if a.task != "-" else task), "pid": os.getpid(), "frm": sender, "tag": tag, "batch": batch, "run": run_file.name})
+                        "task": first, "title": (getattr(a, "title", None) or "").strip()[:40] or short_title(a.task if a.task != "-" else task), "pid": os.getpid(), "frm": sender, "tag": tag, "batch": batch, "run": run_file.name,
+                        "kind": ag.get("run"), "backend": backend, "out": str(_CUR["live"]), "session": session, "channel": os.environ.get("AGENTBUS_CHAT")})
     try:
         before = quota.snapshot(billing)
     except Exception as e:
@@ -509,22 +704,25 @@ def cmd_ask(a):
         if billing == "codex" and q.get("ok") and not a.allow_credits and max(q.get("weekly") or 0, q.get("five_hour") or 0) >= 100:
             return (f"GPT 额度用完了（本周 {q.get('weekly')}%、5 小时 {q.get('five_hour')}%），再派会扣付费 credits"
                     f"（现在 {q.get('credits')}）。确定要用就加 --allow-credits，或者换别的 agent。")
-    if credits_block(before):
-        running.unlink(missing_ok=True)
-        sys.exit(credits_block(before))
-    save_json(running, dict(load_json(running, {}), before=_slim(before)))
-    board_add(bus, kind="task", frm=sender, to=agent_id, text=task, run=run_file.name, tag=tag, batch=batch, conv=conv[:12])
+    update_json(running, lambda row: row.update(before=_slim(before)))
+    board_add(bus, kind="task", frm=sender, to=agent_id, text=task, run=run_file.name, tag=tag, batch=batch, conv=conv[:12], backend=backend)
     print(f"[agentbus] {sender} → {agent_id}（{'续上次会话' if session else '新会话'}）开始 {now()}", file=sys.stderr, flush=True)
     _, retries = watchdog_cfg()
     import scheduler
     text, sid, raw, tok, ok, status = None, session, "", None, False, "error"
     sched = scheduler.acquire(agent_id, ag, tag, getattr(a, "screen", False), running, first)
+    original_prompt = prompt
     try:
+        if why := credits_block(before):
+            text, status = f"（没开工：{why}）", "quota"
+            raise _NoStart()
+        if not backend:
+            raise DispatchBlocked("cli_unavailable")
         sched.__enter__()  # 先排队：屏幕锁、钱包并发
         if sched.waited > 1:  # 等过队：开工时间和额度起点从现在算
             t0 = time.time()
             before = quota.snapshot(billing, refresh=True)
-            save_json(running, dict(load_json(running, {}), start=t0, before=_slim(before)))
+            update_json(running, lambda row: row.update(start=t0, before=_slim(before)))
 
         def admit(attempt):
             """每次真正启动前按主人现在的设置再查一遍：排队 / 重试期间重新封印了、额度用完了，就不开工。"""
@@ -539,9 +737,11 @@ def cmd_ask(a):
             why = admit(attempt)
             if why:
                 text = "（没开工：" + ("排队期间" if attempt == 0 else "重试前") + why + "）"
+                status = "quota" if why.startswith("GPT 额度") else "not_started"
                 raise _NoStart()
             try:
                 text, sid, raw, tok = run_agent(agent_id, ag, root, prompt, session, run_file)
+                text, sid, raw, tok = _follow_ups(agent_id, ag, root, prompt, session, run_file, running, text, sid, raw, tok, bus, sender)
                 ok = not _looks_failed(text)
                 status = "ok" if ok else "failed"
                 break
@@ -549,18 +749,51 @@ def cmd_ask(a):
                 note = f"{ag['name']} {e}，已停掉"
                 if attempt < retries:
                     note += f"，开新会话重试（第 {attempt + 1} 次）"
-                    prompt += ("\n\n## 注意：上一次接这个活中途卡住、被 agentbus 停掉了\n"
+                    import jobs
+                    previous_notes = [n["text"] for n in jobs.notes({"_file": str(running)}) if n.get("used")]
+                    prompt = original_prompt + ("\n\n## 注意：上一次接这个活中途卡住、被 agentbus 停掉了\n"
                                "先检查项目里已经产出的文件，合格的不要重做，把剩下的做完。回复里说明哪些是这次补的。")
+                    if previous_notes:
+                        prompt += "\n\n## 主人已发来的补充\n" + "\n".join(f"- {note}" for note in previous_notes)
                     session = None
-                    save_json(running, dict(load_json(running, {}), retry=attempt + 1, retry_t=time.time(), stalled=str(e)))
+                    update_json(running, lambda row: row.update(retry=attempt + 1, retry_t=time.time(), stalled=str(e)))
                 print(f"[agentbus] {note}", file=sys.stderr, flush=True)
                 board_add(bus, kind="msg", frm="agentbus", to=sender, text=note, run=run_file.name)
         else:
             text, status = f"（{ag['name']} 连续卡住 {retries + 1} 次，已停止。可能已经产出了一部分文件，请检查后再派。）", "stalled"
+        if load_json(running, {}).get("stop"):  # 主人在界面里停的：执行器可能先倒下、外层没收到信号，回复照样写成“主人停了”
+            raise KeyboardInterrupt
+    except DispatchBlocked as e:
+        from logins import dispatch_action
+        from urllib.parse import quote
+        status = e.code
+        sid = e.session or sid
+        action = dispatch_action(ag, status)
+        if status == "sealed":
+            text = CLAUDE_SEALED
+        elif status == "cli_login":
+            text = f"（{ag['name']} 的 CLI 需要登录。）"
+            if action:
+                text += f"\n请在 AgentBus 队员页选择「{action['label']}」：{URL}/#hero/{quote(agent_id, safe='')}"
+        else:
+            text = f"（{ag['name']} 的 CLI 不可用。）"
+            if action:
+                text += "\n要改用桌面端吗？请先取得用户明确同意。"
+        if str(e) and status != "sealed":
+            text += "\n" + str(e)
     except _NoStart:
-        status = "not_started"
+        pass
     except KeyboardInterrupt:
-        text, status = f"（这单被手动停掉了：{ag['name']} 没做完）", "stopped"
+        ok = False
+        record = load_json(running, {})
+        if record.get("doubao_run") and record.get("session"):
+            sid = record["session"]
+            text = f"（已停止等待豆包。豆包已受理，会话 {sid}，任务 {record['doubao_run']}。请在豆包里确认状态或停止任务。）"
+        elif record.get("takeover"):
+            text = f"（主人接管了这单：{ag['name']} 的会话已经在终端里由主人接着聊，这单先不算做完。等主人说做完了再检查产出，不要重派。）"
+        else:
+            text = f"（这单被主人在 agentbus 里停掉了：{ag['name']} 没做完。先别重派，问主人要不要换做法。）"
+        status = "stopped"
     except BaseException as e:  # 任何意外都要留下回复，不能让主位干等
         import traceback
         text = f"（agentbus 派活出错，{ag['name']} 没做完：{type(e).__name__}: {e}）"
@@ -588,10 +821,43 @@ def cmd_ask(a):
     sys.exit(0 if ok else 1)
 
 
+def _follow_ups(agent_id, ag, root, prompt, session, run_file, running, text, sid, raw, tok, bus, sender):
+    """主人在界面里补充了话：这一轮跑完（或被“停下改”打断）后，接着同一个会话发给队员，直到没有新的补充。
+    所有执行器通用：靠的是各家都能续会话；续不上（没拿到会话号）就开新会话，带上原任务和补充。"""
+    import jobs
+    rounds = 0
+    while True:
+        from config import locked
+        with locked(running.stem):
+            rec = load_json(running, {})
+            cut = rec.pop("interrupt", None)
+            if cut:
+                save_json(running, rec)
+        extra = jobs.take_notes(running, close_when_empty=True)
+        if not extra:
+            break
+        rounds += 1
+        board_add(bus, kind="msg", frm="user", to=agent_id, text="（在 agentbus 里补充）" + "\n".join(extra), run=run_file.name)
+        follow = ("## 主人刚补充的话（在你干活时从 agentbus 发来）\n" + "\n".join(f"- {x}" for x in extra)
+                  + ("\n\n你刚才那一轮被主人中途停下了。" if cut else "") + "\n\n按补充调整，接着把活做完；回复照常交（说明按补充改了什么）。")
+        resume = sid or session
+        if not resume:
+            follow = prompt + "\n\n" + follow + "\n先检查项目里已经产出的文件，合格的不要重做。"
+        update_json(running, lambda row: row.update(round=rounds + 1))
+        text, sid2, raw2, tok2 = run_agent(agent_id, ag, root, follow, resume, run_file)
+        sid = sid2 or resume
+        raw = (raw or "") + "\n" + (raw2 or "")
+        if tok2:
+            tok = {k: (tok or {}).get(k, 0) + v if isinstance(v, (int, float)) else v for k, v in tok2.items()} if tok else tok2
+    if rounds and text and not _looks_failed(text):
+        text = f"（中途主人补充了 {rounds} 次，已按补充调整）\n\n{text}"
+    return text, sid, raw, tok
+
+
 def _looks_failed(text):
     """回复是 agentbus 自己补的“没回复 / 出错 / 卡住”就算失败（队员正常交的回复里说没做成，也照常算交了回复）。"""
     t = (text or "").strip()
-    return not t or (t.startswith("（") and any(k in t[:60] for k in ("没有回复", "出错", "卡住", "没接上", "调用出错", "停掉", "已停止", "超时", "没做完", "没开工")))
+    return not t or (t.startswith("（") and any(k in t[:60] for k in ("没有回复", "提前退出", "出错", "卡住", "没接上", "调用出错", "停掉", "已停止", "超时", "没做完", "没开工")))
 
 
 def _finish(v):
@@ -628,17 +894,26 @@ def _finish(v):
     stamp = run_file.name.split("-" + agent_id)[0]
     run_file.with_suffix(".md").write_text(
         f"# {sender} → {agent_id}  {stamp}\n会话：{sid}\n\n## 发出的完整提示\n\n{v['prompt']}\n\n## 回复\n\n{text}\n", "utf-8")
+    live = run_file.with_suffix(".live")
+    if not raw and live.exists():  # 被停掉、出错时没拿到整理好的输出：留下跑到哪一步的实时输出，详情页还能看过程
+        raw = live.read_text("utf-8", errors="replace")
     run_file.with_suffix(".jsonl").write_text(raw or "", "utf-8")
+    live.unlink(missing_ok=True)  # 实时输出已经整份进了 .jsonl
+    (RUNNING / (run_file.name + ".notes.jsonl")).unlink(missing_ok=True)
     ledger_add({"id": run_id, "project": name, "batch": batch, "agent": agent_id, "billing": billing, "tag": tag,
                 "task": v["first"], "start": t0, "end": t1, "seconds": round(t1 - t0), "ok": ok, "status": v.get("status") or ("ok" if ok else "failed"), "frm": sender,
                 "reply": text[:600], "before": _slim(v["before"]), "after": _slim(after), "cost": cost, "tokens": tok, "overlap": v["others"],
-                "settle_at": t1 + 240 if billing == "deepseek" else None, "conv": conv[:12]})
+                "settle_at": t1 + 240 if billing == "deepseek" else None, "conv": conv[:12], "brain": _CUR.get("brain"), "backend": v.get("backend")})
     board_add(bus, kind="reply", frm=agent_id, to=sender, text=text, run=run_file.name, tag=tag, batch=batch,
               cost=cost, seconds=round(t1 - t0), ok=ok, status=v.get("status"), conv=conv[:12])
     if os.environ.get("AGENTBUS_CHAT"):  # 消息里 @ 来的活：回复发回群里；回复里 @ 了别人就接力派下去（有循环保护）
         try:
             import chat
-            chat.send(os.environ["AGENTBUS_CHAT"], text if ok else f"❌ {text}", frm=agent_id, hops=int(os.environ.get("AGENTBUS_CHAT_HOPS", "0")))
+            channel = os.environ["AGENTBUS_CHAT"]
+            if ok:
+                chat.send(channel, text, frm=agent_id, hops=int(os.environ.get("AGENTBUS_CHAT_HOPS", "0")))
+            else:
+                chat.failure(channel, ag, v.get("status"), text)
         except Exception as e:
             print(f"[agentbus] 回复发回群里失败：{e}", file=sys.stderr)
     print(text)
@@ -805,6 +1080,51 @@ def _post(path, body):
         pass
 
 
+def roster_print(cfg=None):
+    """队伍现在的样子（谁能命令行派活、用什么模型、主力岗位），只读配置、不跑命令，钩子里每句话都能算。"""
+    from config import sealed
+    from catalog import CATEGORIES
+    cfg = cfg or load_config()
+    cats = {cid: cname for cid, cname, _ in CATEGORIES}
+    out = {}
+    for aid, a in agents_dict(cfg).items():
+        if a.get("hidden"):
+            continue
+        try:
+            if not installed(a):
+                continue
+        except Exception:
+            continue
+        b = (cfg.get("brains") or {}).get(aid) or {}
+        out[aid] = {"name": a["name"], "can": bool(a.get("run")) and a.get("billing") != "manual" and not sealed(a, cfg),
+                    "brain": " ".join(x for x in (b.get("model"), b.get("effort")) if x),
+                    "jobs": sorted((cats.get(k[4:], k[4:]) + "（整类）" if k.startswith("cat:") else k[4:])
+                                   for k, v in ((cfg.get("jobs") or {}).get(aid) or {}).items() if v == "prefer")}
+    return out
+
+
+def roster_news(old, new):
+    """和上次告诉主位的比，队伍变了什么。主位照着改做法，主人不用再专门去说。"""
+    lines = []
+    for aid, n in new.items():
+        o = old.get(aid)
+        jobs = "、".join(n["jobs"])
+        if o is None:
+            lines.append(f"新队员 {n['name']}（{aid}）：{'能命令行派活' if n['can'] else '只能主人手动传话'}" + (f"，主力 {jobs}" if jobs else ""))
+            continue
+        if n["can"] and not o["can"]:
+            lines.append(f"{n['name']}（{aid}）现在能命令行派活了：以前要主人手动转交给它的活（{jobs or '它负责的那些'}），"
+                         f"以后直接 `agentbus ask {aid}` 或按岗位 --tag 派，不要再写文档让主人转交")
+        elif o["can"] and not n["can"]:
+            lines.append(f"{n['name']} 现在不能派活了（封印了或改成了网页版）：它的活改派别人，或请主人手动")
+        if n["brain"] != o["brain"]:
+            lines.append(f"{n['name']} 的模型换成了 {n['brain'] or '它自己的默认'}（派活时自动用，任务里不用写）")
+        if n["jobs"] != o["jobs"]:
+            lines.append(f"{n['name']} 的主力岗位改成：{jobs or '无'}")
+    lines += [f"{o['name']} 已经不在队伍里了，别再派给它" for aid, o in old.items() if aid not in new]
+    return lines
+
+
 def join_brief(agent):
     """接入 bus 时塞给这个窗口的上下文：和 MCP 握手（agentbus_hello）同一份。"""
     try:
@@ -855,6 +1175,17 @@ def cmd_hook(a):
                 touch_lead(agent, "mcp", conv)
             else:
                 out.append("（这个窗口已接入 agentbus，但握手信息这次没取到，下一句话会再试；也可以直接调 agentbus_hello。）")
+        if j and j.get("briefed") and not j.get("declined"):  # 队伍变了（谁能派活了、换了模型、换了岗位）：主动告诉主位
+            try:
+                now_r = roster_print()
+                news = roster_news(j["roster"], now_r) if isinstance(j.get("roster"), dict) else []
+                if news or not isinstance(j.get("roster"), dict):
+                    update_json(JOINED, lambda jj: jj.get(conv, {}).__setitem__("roster", now_r) if conv in jj else None)
+                if news:
+                    out.append("[agentbus 队伍变化] 下面这些从现在起生效，按它调整派活（和项目文档里写的旧分工冲突时以这里为准）：\n"
+                               + "\n".join(f"- {x}" for x in news))
+            except Exception as e:
+                print(f"agentbus 队伍变化没算出来：{e}", file=sys.stderr)
         rs = unseen_results()
         if rs:
             out.append("[agentbus 回音] 你派出去的活有新结果，先处理再继续：\n" + "\n\n".join(_result_text(r) for r in rs))

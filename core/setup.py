@@ -8,7 +8,7 @@ import re
 
 import brains
 from catalog import CATEGORIES, CAPS
-from config import agents_dict, installed, load_config, save_config
+from config import agents_dict, installed, load_config, save_config, sealed
 
 # 每个职能大类最看重的能力（越靠前越重要）
 CAT_NEEDS = {
@@ -31,7 +31,7 @@ STRENGTH = {
     "kimi": {"research": 2, "editing": 1, "office": 1},
     "cursor": {"dev": 3},
 }
-LEAD_ORDER = ["claude", "codex", "gemini", "kimi", "codebuddy", "opencode", "qwen", "cursor", "zcode", "dsh"]
+LEAD_ORDER = ["codex", "gemini", "kimi", "codebuddy", "opencode", "qwen", "cursor", "zcode", "dsh"]
 
 # 模型擅长什么（按名字认，没认出来的不贴标签）
 MODEL_TAGS = [
@@ -67,7 +67,7 @@ def evaluate():
     cfg = load_config()
     ags = agents_dict(cfg)
     found = [(aid, a) for aid, a in ags.items()
-             if not a.get("hidden") and not a.get("clone_of") and installed(a) and a.get("run")]
+             if not a.get("hidden") and not a.get("clone_of") and not sealed(a) and installed(a) and a.get("run")]
     usable = [(aid, a) for aid, a in found if a.get("billing") != "manual"]  # 网页版要人传话，不自动排进阵容
     cat_name = {c[0]: c[1] for c in CATEGORIES}
 

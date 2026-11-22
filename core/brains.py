@@ -3,10 +3,9 @@
 外壳（agent）决定能干什么，大脑（模型）决定干得好不好；同一个外壳可以开几个分身，各用各的大脑。
 模型列表和强度档位都从本机自动识别，不写死，换一台电脑也能用：
   Codex    读 ~/.codex/models_cache.json（Codex 自己维护的模型目录，含每个模型支持的强度和默认强度）
-  Claude   读 `claude --help` 里 --model 的别名和 --effort 的档位
   opencode 跑 `opencode models --standalone`（要十几秒，后台跑，结果存盘）+ 历史会话里用过的强度
   zcode    用它的协议（app-server）开个不落盘的临时会话，读模型和档位；派活时短暂改它的默认模型（见 zcode_brain）
-派活时怎么带上：Claude --model/--effort，Codex -m + -c model_reasoning_effort=，opencode -m 供应商/模型#强度。
+派活时怎么带上：Codex -m + -c model_reasoning_effort=，opencode -m 供应商/模型#强度。
 """
 import json
 import os
@@ -51,28 +50,12 @@ def _codex():
 
 
 def _help(cmd):
+    import pf
+
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout
+        return subprocess.run(pf.resolve(cmd), capture_output=True, text=True, timeout=15).stdout
     except Exception:
         return ""
-
-
-def _claude():
-    h = _help(["claude", "--help"])
-    em = re.search(r"--effort[^\n]*\n?[^(]*\(([^)]+)\)", h)
-    efforts = [x.strip() for x in em.group(1).split(",")] if em else ["low", "medium", "high"]
-    mm = re.search(r"--model <model>(.*?)\n  --", h, re.S)
-    aliases = re.findall(r"'([a-z][a-z0-9-]*)'", mm.group(1)) if mm else []
-    aliases = list(dict.fromkeys(aliases + ["haiku"])) if aliases else ["opus", "sonnet", "haiku"]
-    cur = None
-    try:
-        cur = json.loads(Path(H("~/.claude/settings.json")).read_text()).get("model")
-    except Exception:
-        pass
-    models = [{"id": a, "name": a.capitalize(), "efforts": efforts} for a in aliases]
-    if cur and cur not in aliases:
-        models.insert(0, {"id": cur, "name": cur, "efforts": efforts})
-    return {"models": models, "current": {"model": cur, "effort": None}, "switch": True}
 
 
 def _opencode_default():
@@ -213,8 +196,8 @@ class zcode_brain:
 
     def __enter__(self):
         m = self.brain.get("model")
-        if not m or "/" not in m:
-            return self
+        if not self.brain.get("effort") and (not m or "/" not in m):
+            return self  # 没选模型也没选强度：用它自己的设置
         import pf
         self.lock = open(H("~/.agentbus/zcode-swap.lock"), "a+")
         pf.lock(self.lock)
@@ -222,7 +205,11 @@ class zcode_brain:
         try:
             self.orig = ZCODE_CFG.read_bytes()
             d = json.loads(self.orig)
-            prov, mid = m.split("/", 1)
+            cur = d["config"].get("defaultModelSelection") or {}
+            if m and "/" in m:
+                prov, mid = m.split("/", 1)
+            else:  # 只选了思考强度：模型用它现在的默认，只换强度
+                prov, mid = cur["providerId"], cur["modelId"]
             sel = {"providerId": prov, "modelId": mid}
             e = self.brain.get("effort") or (d["config"].get("defaultModelSelection") or {}).get("options", {}).get("reasoningLevel")
             if self.brain.get("effort") or e:
@@ -265,10 +252,48 @@ def _which(cmd):
     return shutil.which(cmd)
 
 
-READERS = {"codex": _codex, "claude": _claude, "opencode": _opencode, "zcode": _zcode}
-SLOW = {"opencode", "claude", "zcode"}  # 要跑命令的：后台识别，先用存盘的结果
+def _agy():
+    """反重力：`agy models` 每行“模型id<TAB>名字”，强度写在 id 里（gemini-4-hydrogen-high 这种），所以不单列强度。"""
+    import pf
+
+    try:
+        result = subprocess.run(pf.resolve(["agy", "models"]), capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+    if result.returncode:
+        return None
+    models = []
+    for line in result.stdout.splitlines():
+        model, tab, name = line.partition("\t")
+        model = model.strip()
+        if tab and model and not any(c.isspace() for c in model):
+            models.append({"id": model, "name": name.strip() or model, "efforts": []})
+    if not models:
+        return None
+    return {"models": models, "current": {}, "switch": True}
+
+
+def from_help(bin_):
+    """通用：没有专门读法的命令行，从它的 --help 里认 --model（后面列了可选值就做成列表，没列就让主人自己填）
+    和 --effort / --reasoning-effort 的档位。新接进来的 agent 只要命令行有 --model，就能在战备里选模型。"""
+    h = _help([bin_, "--help"]) or _help([bin_, "-h"])
+    mm = re.search(r"^\s*(--model)\b[^\n]*", h, re.M)
+    if not mm:
+        return {"models": [], "current": {}, "switch": False, "note": "它的命令行没有选模型的参数，用它自己的默认模型"}
+    line = mm.group(0)
+    lst = re.search(r"(?:supported|choices|available|可选)[^(:：]*[:：(]\s*\(?([^)\n]+)", line, re.I)
+    models = [x.strip(" .'\"") for x in lst.group(1).split(",") if x.strip(" .'\"")] if lst else []
+    em = re.search(r"^\s*(--(?:effort|reasoning-effort|thinking-effort))\b[^\n]*?\(([^)]+)\)", h, re.M)
+    efforts = [x.strip() for x in em.group(2).split(",") if x.strip()] if em else []
+    return {"models": [{"id": x, "name": x, "efforts": efforts} for x in models], "current": {}, "switch": True, "free": not models,
+            "flags": {"model": mm.group(1), "effort": em.group(1) if em else None}}
+
+
+READERS = {"codex": _codex, "opencode": _opencode, "zcode": _zcode, "agy": _agy}
 TTL = 6 * 3600
 _mem, _busy = {}, set()
+_agy_lock = threading.Lock()
+_agy_next_attempt = 0
 
 
 def _load_disk():
@@ -280,31 +305,56 @@ def _load_disk():
 
 def _detect(kind):
     try:
-        r = READERS[kind]()
+        r = READERS[kind]() if kind in READERS else from_help(kind.split(":", 1)[1])
+        if r is None:  # 反重力退出登录、超时或返回空目录时继续用上次成功的列表
+            return
         r["t"] = time.time()
         _mem[kind] = r
-        disk = _load_disk()
-        disk[kind] = r
-        CACHE.parent.mkdir(parents=True, exist_ok=True)
-        CACHE.write_text(json.dumps(disk, ensure_ascii=False))
+        from config import update_json
+        update_json(CACHE, lambda disk: disk.__setitem__(kind, r))
     finally:
         _busy.discard(kind)
 
 
-def options(agent, fresh=False):
+def _agy_options(fresh, discover):
+    global _agy_next_attempt
+    with _agy_lock:
+        hit = _mem.get("agy") or _load_disk().get("agy") or {}
+        if hit.get("models"):
+            _mem.setdefault("agy", hit)
+        now = time.time()
+        stale = not hit.get("models") or now - hit.get("t", 0) > TTL
+        if discover and "agy" not in _busy and (fresh or (stale and now >= _agy_next_attempt)):
+            _busy.add("agy")
+            _agy_next_attempt = now + 60
+            threading.Thread(target=_detect, args=("agy",), daemon=True).start()
+        if not hit.get("models"):
+            hit = {"models": [], "current": {}, "switch": True}
+        return dict(hit, free=True, detecting="agy" in _busy)
+
+
+def options(agent, fresh=False, *, discover=True):
     """agent 是 agents_dict 里的一项（分身也行）。慢的识别放后台，先返回上次的结果。"""
+    from config import CLAUDE_SEALED, sealed
+
+    if sealed(agent):
+        return {"models": [], "current": {}, "switch": False, "note": CLAUDE_SEALED}
     kind = agent.get("run")
+    if kind == "agy":
+        return _agy_options(fresh, discover)
     if kind == "api":  # API 队员：模型来自钱包账户
         import wallet
-        ms = wallet.models(agent.get("account"), fresh)
+        ms = wallet.models(agent.get("account"), fresh) if discover else []
         return {"models": [{"id": m, "name": m, "efforts": []} for m in ms], "current": {"model": agent.get("model")}, "switch": True}
     if kind not in READERS:
-        return {"models": [], "current": {}, "switch": False, "note": "这个 agent 暂不支持在 agentbus 里换模型"}
+        if not agent.get("bin") or kind in ("doubao",):
+            return {"models": [], "current": {}, "switch": False, "note": "这个 agent 暂不支持在 agentbus 里换模型"}
+        kind = "help:" + agent["bin"]  # 通用读法：看它 --help 里有没有 --model
     hit = _mem.get(kind) or _load_disk().get(kind)
     stale = fresh or not hit or time.time() - hit.get("t", 0) > TTL
-    if stale and kind not in _busy:
+    if discover and stale and kind not in _busy:
         _busy.add(kind)
-        if kind in SLOW and hit:
+        if kind != "codex":
             threading.Thread(target=_detect, args=(kind,), daemon=True).start()
         else:
             _detect(kind)
@@ -322,11 +372,24 @@ def chosen(cfg, agent_id):
 def flags(kind, brain):
     """把选好的大脑翻成命令行参数。"""
     m, e = brain.get("model"), brain.get("effort")
-    if kind == "claude":
-        return (["--model", m] if m else []) + (["--effort", e] if e else [])
     if kind == "codex":
         return (["-m", m] if m else []) + (["-c", f'model_reasoning_effort="{e}"'] if e else [])
+    if kind == "agy":
+        return (["--model", m] if m else []) + (["--effort", e] if e else [])
     return []
+
+
+def generic_flags(bin_, brain):
+    """通用读法认出来的 agent：按它 --help 里的参数名传模型和强度。"""
+    m, e = brain.get("model"), brain.get("effort")
+    if not (m or e) or not bin_:
+        return []
+    hit = _mem.get("help:" + bin_) or _load_disk().get("help:" + bin_)
+    if not hit:  # 还没识别过（界面没打开过它的模型菜单）：现在识别一次，选了的模型一定要传进去
+        _detect("help:" + bin_)
+        hit = _mem.get("help:" + bin_) or {}
+    f = hit.get("flags") or {}
+    return ([f["model"], m] if m and f.get("model") else []) + ([f["effort"], e] if e and f.get("effort") else [])
 
 
 def opencode_model(brain, default):

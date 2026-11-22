@@ -2,7 +2,6 @@
 循环保护（agent 之间互相 @ 最多接力几次）；叫醒 agent 不用往终端里打字，而是走 agentbus 自己的派活（agentbus ask）。
 
   在群里 @某个队员 → 后台派活给它（带上群里最近几条当上下文）→ 它的回复自动发回群里；回复里再 @别人就接力派下去。
-  @Claude：Claude 不接派活，消息转给 Claude 办公室（它下次干活时在回音里看到）。
   不需要主位：主人直接在消息窗口里就能给任何队员派活。主界面和悬浮窗用的是同一个接口。
 消息存在 ~/.agentbus/chat/<频道>.jsonl。
 """
@@ -114,6 +113,95 @@ def append(channel, frm, text, **extra):
     with open(f, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
     return msg
+
+
+def failure_issue(agent, status, detail=""):
+    """把执行器错误转成可读消息。诊断原文留在工单日志。"""
+    from logins import dispatch_action
+
+    aid = agent.get("id") or ""
+    name = agent.get("name") or aid or "队员"
+    detail = str(detail or "")
+    if sealed(agent):
+        status = "sealed"
+    elif status in (None, "error", "failed"):
+        matches = (
+            ("cli_login", r"cli_login|login.required|authentication (?:required|failed)|sign in|not logged in|invalid_grant|请先登录|需要登录|登录豆包 Headless"),
+            ("cli_unavailable", r"command not found|找不到.*cli|cli 不可用|exec format error"),
+            ("quota", r"quota|insufficient[_ -](?:balance|credits)|rate.limit|\b429\b|额度用完|限流|余额不足"),
+            ("model", r"provider.no.route|model.not.found|unknown model|unsupported model|模型不存在|模型不可用"),
+            ("permission", r"permission denied|access denied|\bEACCES\b|拒绝访问|权限不足"),
+            ("network", r"\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT)\b|network error|connection (?:refused|closed)|网络异常"),
+            ("timeout", r"超时|timed? out|timeout"),
+            ("waiting_input", r"等待用户|waiting_input"),
+        )
+        status = next((code for code, pattern in matches if re.search(pattern, detail, re.I)), "failed")
+        if "任务 " in detail and "会话 " in detail and status in ("timeout", "failed", "cli_login"):
+            if status != "cli_login":
+                status = "remote_pending"
+    notice = {
+        "sealed": "已永久封印。请选择其他队员。",
+        "cli_login": "的命令行需要登录。登录后，请先确认原任务状态，再决定是否重试。",
+        "cli_unavailable": "的命令行目前无法启动。请在队员页检查安装。",
+        "channel_busy": "这单没派出去。频道里的任务达到并发上限，请等一单结束后再发。",
+        "unknown_agent": "没找到指定的队员。请从输入框旁的队员列表选一个。",
+        "manual": "只能接收留言。要自动执行，请换一位支持派活的队员。",
+        "not_started": "没有开工。请在任务记录查看原因，或换一位队员。",
+        "stalled": "长时间没有进展，看门狗已停止这单。请先查看已产出的内容。",
+        "submit_failed": "的任务请求没能提交。请刷新聊天室，确认任务是否出现。",
+        "stopped": "的任务已停止。可在任务记录查看做到了哪一步。",
+        "lost": "的执行进程意外退出。请在任务记录查看已留下的进度。",
+        "quota": "遇到用量限制或余额不足。请查看额度，或换一位队员。",
+        "model": "无法使用当前模型。请去队员页检查模型设置。",
+        "permission": "没有权限访问所需文件或服务。请检查任务用到的目录或授权。",
+        "network": "连接服务失败。请检查网络，再确认原任务是否已受理。",
+        "timeout": "等待服务响应超时。请先确认原任务状态，再决定是否重试。",
+        "remote_pending": "的任务已受理，但 Bus 还没拿到结果。请用任务记录里的会话和任务编号查询原任务。",
+        "waiting_input": "正在等待你在服务里确认。请在原任务中完成确认。",
+        "failed": "没能完成任务。请打开任务记录查看详情。",
+    }.get(status, "没能完成任务。请打开任务记录查看详情。")
+    if status in ("channel_busy", "unknown_agent"):
+        text = notice
+    else:
+        text = name + notice
+    action = dispatch_action(agent, status)
+    if action:
+        action = dict(action, agent=aid)
+    elif status in ("cli_unavailable", "model") and aid:
+        from urllib.parse import quote
+        action = {"kind": "page", "page": "hero/" + quote(aid, safe=""), "label": "打开队员设置"}
+    elif status == "unknown_agent" or status == "sealed":
+        action = {"kind": "page", "page": "team", "label": "查看队员"}
+    elif status == "quota":
+        action = {"kind": "page", "page": "report", "label": "查看用量和余额"}
+    else:
+        action = {"kind": "page", "page": "quests", "label": "查看任务记录"}
+    return {"text": text, "action": action, "status": status, "agent": aid}
+
+
+def failure(channel, agent, status, detail="", *, issues=None):
+    issue = failure_issue(agent, status, detail)
+    if issues is not None:
+        issues.append(issue)
+    return append(channel, "agentbus", issue["text"], system=True, issue=issue)
+
+
+def display_messages(messages):
+    """旧版失败消息保留原始记录，读取时用同一套提示。"""
+    agents = None
+    result = []
+    for message in messages:
+        text = message.get("text") or ""
+        if not message.get("issue") and (text.startswith("❌ （") or (message.get("talk") and
+                re.match(r"（[^\n]{0,60}(?:没有回复|出错|提前退出|需要登录|没开工|没接上|不可用)", text))):
+            if agents is None:
+                agents = agents_dict(load_config())
+            aid = message.get("frm") or ""
+            agent = agents.get(aid) or {"id": aid, "name": aid}
+            issue = failure_issue(agent, "failed", text)
+            message = dict(message, text=issue["text"], system=True, issue=issue)
+        result.append(message)
+    return result
 
 
 def mentions(text, cfg=None):
@@ -237,7 +325,7 @@ def conv_of(channel):
     return "chat-" + hashlib.md5(channel.encode()).hexdigest()[:7]  # 12 位，一个频道一个，派活记录和账单按它分
 
 
-def send(channel, text, frm="user", hops=0, cwd=None, files=None):
+def send(channel, text, frm="user", hops=0, cwd=None, files=None, *, target=None, issues=None):
     """发一条消息。派活模式：@ 到的队员各派一单（没 @ 人就交给值班的）；群聊模式：主人一句话，队员轮流接着聊。
     返回 (消息, [派出去的 job id])。"""
     cfg = load_config()
@@ -250,7 +338,10 @@ def send(channel, text, frm="user", hops=0, cwd=None, files=None):
         append(channel, "agentbus", f"⏸ 队员之间已经接力了 {hops} 次，先停一下，等主人看看（主人 @ 谁都会继续）。", system=True)
         return msg, jobs
     agents = agents_dict(cfg)
-    who = mentions(text, cfg)
+    who = [target] if target else mentions(text, cfg)
+    if (target and target not in agents) or (frm == "user" and not who and text.lstrip().startswith("@")):
+        failure(channel, {}, "unknown_agent", issues=issues)
+        return msg, jobs
     if frm == "user" and mt["mode"] == "talk" and not who:  # 群聊：没点名就让成员轮流聊
         start_talk(channel, msg["id"], cwd)
         return msg, jobs
@@ -263,7 +354,7 @@ def send(channel, text, frm="user", hops=0, cwd=None, files=None):
             return msg, jobs
     from config import locked
     with locked("chat-" + conv_of(channel)):  # 同一个频道的准入和派活排队做：几条消息同时到也不会超出并发上限
-        return msg, _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L)
+        return msg, _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L, issues)
 
 
 def _wait_registered(jid, timeout=6):
@@ -280,26 +371,36 @@ def _wait_registered(jid, timeout=6):
         time.sleep(0.2)
 
 
-def _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L):
+def _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L, issues=None):
     jobs = []
     busy = len(running(channel))
     for aid in who:
         if aid == frm:
             continue
         a = agents.get(aid) or {}
-        if sealed(a):  # 封印的 Claude：不进聊天室，连留言也不转（转了它下次干活会看到，等于被唤醒）
-            append(channel, "agentbus", f"🔒 {a.get('name', aid)} 已封印，不参与聊天室。要让它进来，先在队员页解封。", system=True)
+        if sealed(a):
+            failure(channel, a, "sealed", issues=issues)
             continue
         if a.get("billing") == "manual" or not a.get("run"):  # 网页版没法派
             import subprocess
             import pf
             subprocess.run([*pf.cli_cmd(), "post", aid, f"[聊天室·{channel}] {text}", "--from", frm], capture_output=True, timeout=30)
-            append(channel, "agentbus", f"📮 已转给 {a.get('name', aid)}（它不接派活，下次干活时会看到）", system=True)
+            failure(channel, a, "manual", issues=issues)
             continue
         if busy >= L["max_running"]:
-            append(channel, "agentbus", f"⏳ 这个频道已经有 {busy} 单在跑（上限 {L['max_running']}），{a.get('name', aid)} 这单没派，等前面的做完再 @ 一次。", system=True)
+            failure(channel, a, "channel_busy", issues=issues)
             continue
-        jid = dispatch(channel, aid, text, frm, hops, cwd, files)
+        from config import dispatch_backend
+        if not dispatch_backend(a):
+            failure(channel, a, "cli_unavailable", issues=issues)
+            continue
+        try:
+            jid = dispatch(channel, aid, text, frm, hops, cwd, files)
+        except (OSError, ValueError, SystemExit):
+            import logging
+            logging.exception("无法提交聊天室工单给 %s", aid)
+            failure(channel, a, "submit_failed", issues=issues)
+            continue
         jobs.append(jid)
         busy += 1
         _wait_registered(jid)
@@ -318,7 +419,7 @@ def dispatch(channel, aid, text, frm, hops, cwd=None, files=None):
            "AGENTBUS_SELF": frm if frm != "user" else "user"}
     args = {"agent": aid, "task": task, "tag": None, "new": True}
     jid = mcp_server.start_job(args, env_extra=env, cwd=cwd)
-    append(channel, "agentbus", f"⏳ {names.get(aid, aid)} 接活了", system=True, job=jid, agent=aid)
+    append(channel, "agentbus", f"⏳ 已提交给 {names.get(aid, aid)}，等待执行器启动", system=True, job=jid, agent=aid)
     return jid
 
 
@@ -415,6 +516,7 @@ def run_talk(channel, msg_id):
                       f"现在轮到你发一条群聊消息（第 {r + 1} 轮）：从你擅长的角度说点有用的——补充、反驳、提问、给具体建议都行，可以 @ 某位队员问他。"
                       f"不超过 {L['talk_chars'] // 2} 字，不要客套，不要重复别人说过的。只发言，**不要动手改文件、不要跑命令**。"
                       "如果你没有新东西可说，就只回复「（跳过）」。")
+            p = None
             try:
                 # 和群聊进程同一组：主人喊停时整组一起停；超时则先 SIGTERM，让 ask 自己停掉执行器再收尾
                 p = subprocess.Popen([*pf.cli_cmd(), "ask", aid, prompt, "--new", "--tag", "头脑风暴"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -428,11 +530,14 @@ def run_talk(channel, msg_id):
                     except subprocess.TimeoutExpired:
                         p.kill()
                         p.wait()
-                    reply = ""
+                    reply = "等待响应超时"
             except OSError:
-                reply = ""
+                reply = "无法启动执行器"
             if stopped(channel):
                 break
+            if p is None or p.returncode:
+                failure(channel, a, "failed", reply)
+                continue
             if not reply or "（跳过）" in reply[:20] or reply.startswith("（") and "没有回复" in reply[:30]:
                 continue
             reply = reply[:L["talk_chars"]]

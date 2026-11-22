@@ -72,13 +72,38 @@ fn no_window(cmd: &mut Command) {
 #[cfg(not(windows))]
 fn no_window(_cmd: &mut Command) {}
 
-/// 服务没开就开一个。服务单独跑（不跟着应用退出），Claude 的浏览器和命令行随时能连。
+fn service_is_older(body: &str, app_version: &str) -> bool {
+    let Ok(health) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    if health["app"].as_str() != Some("agentbus") {
+        return false;
+    }
+    let installed = health["version"].as_str().unwrap_or("0.0.0");
+    let parts = |version: &str| version.split('.').map(str::parse::<u64>).collect::<Result<Vec<_>, _>>();
+    matches!((parts(installed), parts(app_version)), (Ok(old), Ok(new)) if old < new)
+}
+
+fn refresh_bundled_service(app: &AppHandle) {
+    if std::env::var_os("AGENTBUS_CORE").is_some() || sidecar(app).is_none() {
+        return;
+    }
+    let Some(health) = http_get("/api/health") else { return };
+    if service_is_older(&health, &app.package_info().version.to_string()) {
+        let _ = http_get("/api/shutdown");
+        for _ in 0..25 {
+            std::thread::sleep(Duration::from_millis(200));
+            if http_get("/api/health").is_none() {
+                break;
+            }
+        }
+    }
+}
+
+/// 服务独立运行，供应用和命令行共用。
 fn ensure_service(app: &AppHandle) {
     if http_get("/api/health").is_some() {
         return;
     }
-    // 先找源码（开发机上 ~/agentbus/core，改了代码立刻生效），没有再用应用里打包好的服务程序（发布版）
-    let dev = service_script(app).filter(|p| !p.starts_with(app.path().resource_dir().unwrap_or_default()));
+    let dev = std::env::var_os("AGENTBUS_CORE").map(|p| PathBuf::from(p).join("service.py")).filter(|p| p.is_file());
     let mut cmd = if let Some(script) = dev {
         let mut c = python_cmd();
         c.arg(&script).arg("8790");
@@ -352,6 +377,7 @@ fn main() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let handle = app.handle().clone();
+            refresh_bundled_service(&handle);
             ensure_service(&handle);
             let hh = handle.clone();
             std::thread::spawn(move || hover_loop(hh));

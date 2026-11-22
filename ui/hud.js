@@ -102,7 +102,8 @@
   }
 
   // ---------- 内容 ----------
-  const liveText = r => r.live ? r.live.text + (r.live.rate ? ` · ${r.live.rate}` : "") : "";
+  const hasCost = r => !!(r && r.live && typeof r.live === "object" && r.live.text); // 这一轮的消耗（对象）；别的字段名撞上也不至于整个面板白屏
+  const liveText = r => hasCost(r) ? r.live.text + (r.live.rate ? ` · ${r.live.rate}` : "") : "";
   // 胶囊里只放一句短话：长路径只留文件名，按显示宽度截（中文算 2），不让原文把悬浮窗撑长
   function clip(t, max = 26) {
     t = String(t || "").replace(/\s+/g, " ").replace(/(?:\/[^\s/]+)+\/([^\s/]+)/g, "$1").trim();
@@ -169,7 +170,7 @@
     const r = runOf(a.id), task = r ? r.task : a.task;
     return `<div class="mem ${a.state}" data-role="${esc(a.id)}">${ring(a, dock === "top" ? 40 : 34)}
       <div class="tx"><div class="l1"><b>${esc(a.name)}</b><span class="st">${r ? `<span class="clock" data-since="${r.start}"></span>` : STATE[a.state].t}</span></div>
-        ${r && r.live ? `<span class="qt live ${qcls(a)}" title="这一轮到现在的消耗，每 1–2 分钟更新">${esc(r.live.text.replace(/（.*$/, ""))}${r.live.rate ? " · " + esc(r.live.rate) : ""}</span>` : ""}
+        ${hasCost(r) ? `<span class="qt live ${qcls(a)}" title="这一轮到现在的消耗，每 1–2 分钟更新">${esc(r.live.text.replace(/（.*$/, ""))}${r.live.rate ? " · " + esc(r.live.rate) : ""}</span>` : ""}
         ${meterHTML(a)}
         ${dock !== "top" && a.state === "working" && task ? `<span class="task">${U(task)}</span>` : ""}</div></div>`;
   }
@@ -213,7 +214,7 @@
   function questsTab() {
     const list = (quests || []).slice(0, 30);
     const row = (key, a, r1, r2, extra = "") => `<div class="q ${openMsg === key ? "open" : ""}" data-msg="${esc(key)}">${avatar(a, 22)}<div class="m"><div class="r1"><b>${esc(a.name)}</b>${r1}</div><div class="r2">${esc(r2)}</div>${extra}</div></div>`;
-    const run = S.running.map(r => { const a = A(r.agent); return row("r" + r.id, a, `<span class="clock" data-since="${r.start}"></span>${r.live ? `<span class="cost ${r.live.cny != null ? "gold" : ""}">${esc(liveText(r))}</span>` : ""}`, (r.queued ? "⏳ " : "") + (r.retry ? `[重试 ${r.retry}] ` : "") + r.task,
+    const run = S.running.map(r => { const a = A(r.agent); return row("r" + r.id, a, `<span class="clock" data-since="${r.start}"></span>${hasCost(r) ? `<span class="cost ${r.live.cny != null ? "gold" : ""}">${esc(liveText(r))}</span>` : ""}`, (r.queued ? "⏳ " : "") + (r.retry ? `[重试 ${r.retry}] ` : "") + r.task,
       a.acts && a.acts[0] ? `<div class="r3">${esc(a.acts[0].plain)}</div>` : ""); }).join("");
     const done = list.filter(q => q.done).map(q => row("q" + q.run, A(q.agent), `<span class="cost ${q.cost && q.cost.cny != null ? "gold" : ""}">${esc(costText(q.cost) || mins(q.seconds))}</span>`,
       (q.task || "").split("\n")[0], openMsg === "q" + q.run && q.reply ? `<div class="r3">${U(q.reply)}</div>` : "")).join("");
@@ -239,7 +240,7 @@
     const now = r ? `<div class="now"><span class="clock" data-since="${r.start}"></span><b>${U(r.task)}</b>${a.acts && a.acts[0] ? `<span>${esc(a.acts[0].plain)}</span>` : ""}</div>`
       : `<div class="now idle-now"><b>${STATE[a.state].t}</b>${a.acts && a.acts[0] ? `<span>上一步：${esc(a.acts[0].plain)}</span>` : ""}</div>`;
     const acts = [a.open && a.open.app ? `<button class="fb primary" data-openrole="app">${icon("open")}桌面端</button>` : "",
-      a.open && a.open.cli ? `<button class="fb" data-openrole="cli">${icon("quests")}CLI</button>` : "",
+      a.open && a.open.cli && !r ? `<button class="fb" data-openrole="cli">${icon("quests")}CLI</button>` : "",
       a.installed ? `<button class="fb" data-moverole="${a.place === "office" ? "lounge" : "office"}">${a.place === "office" ? "去休息" : "上阵"}</button>` : "",
       `<button class="fb" data-go="hero/${encodeURIComponent(a.id)}">战备 ${icon("chev")}</button>`].join("");
     return `<div class="role"><button class="back" data-back title="返回">${icon("chev")}</button>
@@ -247,7 +248,82 @@
         ${a.quota_text ? `<span class="qt ${qcls(a)}">${esc(shortQ(a.quota_text))}</span>` : ""}</div></div>
       ${now}
       <div class="today"><div><span>今天</span><b>${todayDone.length} 个</b></div><div><span>用时</span><b>${mins(todayDone.reduce((s, q) => s + (q.seconds || 0), 0))}</b></div><div><span>${S.batch ? "本批消耗" : "项目消耗"}</span><b>${a.billing === "deepseek" ? money(b.cny) : a.billing === "codex" ? (b.weekly ? "-" + b.weekly.toFixed(0) + "%" : b.runs ? "<1%" : "—") : "—"}</b></div></div>
-      ${skills ? `<div class="skills">${skills}</div>` : ""}<div class="ra">${acts}</div></div>`;
+      ${r ? jobHTML(a, r) : lastHTML(a)}${skills ? `<div class="skills">${skills}</div>` : ""}<div class="ra">${acts}</div></div>`;
+  }
+  // 这单的工作过程：从它自己的实时输出里读（所有队员通用），可以补充、停下改、停止、接管（在终端里接着这个会话聊）
+  let jobView = null, jobLast = null, jobLastFor = null, jobLastT = 0, jobDraft = "", jobCut = false;
+  const JK = { 想: "think", 做: "do", 说: "say", 结果: "ok", 错: "err", 补充: "me" };
+  // 时间线：最新的在最上面
+  const evRows = evs => evs.slice(-30).reverse().map(e => `<div class="jv-e ${JK[e.k] || ""}" ${e.detail ? `title="${esc(e.detail.slice(0, 600))}"` : ""}><span>${esc(e.t)}</span><i>${esc(e.k)}</i><p data-notr>${esc(e.text)}</p></div>`).join("");
+  // 底下永远有一个输入框 + 发送：在干活时 = 补充给它（勾上“立刻打断”就马上停下这一轮按你说的改）；闲着时 = 直接派一单新活给它
+  function composer(a, r) {
+    const can = a.installed && a.billing !== "manual" && !a.sealed;
+    if (!can) return `<div class="jv-note">${a.sealed ? `${esc(a.name)} 封印中，不接活` : `${esc(a.name)} 不能在这里派活`}</div>${noteHTML2()}`;
+    return `<div class="jv-in"><input id="job-text" placeholder="${r ? `对 ${esc(a.name)} 补充…（回车发送，这一轮做完就照着改）` : `给 ${esc(a.name)} 派个活…（回车发送）`}" value="${esc(jobDraft)}">
+        <button class="send" data-jsend>发送</button>${r ? `<button class="stop" data-jstop title="整单停掉，主位会收到“主人停了”">${sure("stop") ? "再点确认" : "停止"}</button>` : ""}</div>${noteHTML2()}
+      ${r ? `<div class="jv-opt"><label><input type="checkbox" id="job-cut" ${jobCut ? "checked" : ""}> 立刻打断，按这句马上改</label>${(jobView && jobView.id === r.id && jobView.can_takeover) ? `<button data-jtake title="停掉后台这单，在终端里接着它的会话亲自聊">${sure("take") ? "再点确认" : "在终端接管"}</button>` : ""}</div>` : ""}`;
+  }
+  function jobHTML(a, r) {
+    const j = jobView && jobView.id === r.id ? jobView : null;
+    const evs = j ? j.events : null;
+    const list = !evs ? `<div class="jv-empty">读取中…</div>` : evs.length ? evRows(evs)
+      : `<div class="jv-empty">${j && !j.streams ? `${esc(a.name)} 跑完才出结果，过程看不到；可以照常补充或停止` : "还没有动静"}</div>`;
+    const retry = j && j.retry && j.stalled ? `<div class="jv-note"><b>看门狗第 ${j.retry} 次重试</b> <span data-notr>${esc(j.stalled)}</span></div>` : "";
+    return `<div class="jv"><div class="jv-h"><b>工作过程</b>${j && j.brain ? `<em>${esc(j.brain)}</em>` : ""}${j && j.round > 1 ? `<em>第 ${j.round} 轮</em>` : ""}</div>
+      ${composer(a, r)}${retry}<div class="jv-l">${list}</div></div>`;
+  }
+  // 没在干活：给看它上一单的过程（只读），输入框直接派新活
+  function lastHTML(a) {
+    const l = jobLast && jobLast.agent === a.id ? jobLast : null;
+    const head = l ? `<b>上一单的过程</b><em>${new Date(l.end * 1000).toLocaleTimeString().slice(0, 5)} 结束</em>` : `<b>工作过程</b>`;
+    const body = !l ? `<div class="jv-empty">${jobLast === false ? "还没派过活" : "读取中…"}</div>`
+      : (l.events || []).length ? evRows(l.events) : `<div class="jv-empty">这一单没有留下过程记录</div>`;
+    const reply = l && l.kind === "codebuddy" && l.reply ? `<details class="jv-reply"><summary>查看本单回复</summary><p data-notr>${esc(l.reply)}</p></details>` : "";
+    return `<div class="jv ${l ? "done" : ""}"><div class="jv-h">${head}</div>${composer(a, null)}${reply}<div class="jv-l">${body}</div></div>`;
+  }
+  async function loadJob() {
+    const r = open && role ? runOf(role) : null;
+    if (!r) {
+      if (!(open && role) || (jobLast !== null && jobLastFor === role && Date.now() - jobLastT < 15000)) return;
+      const d = await fetch("/api/job?agent=" + encodeURIComponent(role)).then(x => x.json()).catch(() => null);
+      if (!d || !(open && role)) return;
+      const same = JSON.stringify(d.last || false) === JSON.stringify(jobLast) && jobLastFor === role;
+      jobLast = d.last || false; jobLastFor = role; jobLastT = Date.now();
+      if (same) return;
+      const had = document.activeElement && document.activeElement.id === "job-text", pos = had ? document.activeElement.selectionStart : 0;
+      panel.dataset.html = ""; render();
+      const i = document.getElementById("job-text"); if (had && i) { i.focus(); i.setSelectionRange(pos, pos); }
+      return;
+    }
+    const d = await fetch("/api/job?id=" + encodeURIComponent(r.id)).then(x => x.json()).catch(() => null);
+    if (!d) return;
+    const before = JSON.stringify(jobView);
+    jobView = d.job;
+    if (JSON.stringify(jobView) === before || !(open && role)) return;
+    const had = document.activeElement && document.activeElement.id === "job-text", pos = had ? document.activeElement.selectionStart : 0;
+    const l0 = panel.querySelector(".jv-l"), keep = l0 ? l0.scrollTop : 0; // 最新在上：用户往下翻旧记录时别把他拽回顶部
+    panel.dataset.html = ""; render();
+    const l = panel.querySelector(".jv-l"); if (l) l.scrollTop = keep;
+    const i = document.getElementById("job-text"); if (had && i) { i.focus(); i.setSelectionRange(pos, pos); }
+  }
+  setInterval(loadJob, 2000);
+  panel.addEventListener("toggle", e => { if (open && e.target.matches(".jv-reply")) layout(); }, true);
+  // 提示和“再点确认”都存在变量里、跟着重画：面板每 2 秒刷新也不会把它们冲掉
+  let jobNote = null, jobSure = null;
+  function jobMsg(t, issue = null) {
+    const duration = issue ? 20000 : 5000;
+    jobNote = { t, issue, until: Date.now() + duration };
+    panel.dataset.html = ""; render();
+    setTimeout(() => { if (jobNote && Date.now() >= jobNote.until) { jobNote = null; panel.dataset.html = ""; render(); } }, duration + 100);
+  }
+  const noteHTML2 = () => jobNote && Date.now() < jobNote.until ? `<div class="jv-msg" role="status">${esc(jobNote.t)} ${AB.issueAction(jobNote.issue, true)}</div>` : "";
+  const sure = k => jobSure && jobSure.k === k && Date.now() - jobSure.t < 3000;
+  async function jobAct(path, body, done) {
+    const r = runOf(role); if (!r) return;
+    const res = await fetch(path, { method: "POST", body: JSON.stringify({ id: r.id, ...body }) }).then(x => x.json()).catch(() => ({ error: "连不上本地服务" }));
+    if (res.error) { jobMsg(res.error); return; }
+    if (done) done();
+    loadJob();
   }
   // 消息：和主界面「消息」页同一个接口——@ 队员就是派活，回复自动发回群里
   let chatData = null, chatRev = null, chatDraft = "";
@@ -264,27 +340,73 @@
   function chatTab() {
     if (!chatData) { loadChat(); return `<div class="list"><div class="idle">读取中…</div></div>`; }
     const nm = id => id === "user" ? "我" : A(id).name;
-    const rows = chatData.messages.slice(-6).map(m => m.system ? `<div class="cmsg sys">${esc(m.text)}</div>`
+    const rows = chatData.messages.slice(-6).map(m => m.system ? `<div class="cmsg sys">${esc(m.text)} ${AB.issueAction(m.issue, true)}</div>`
       : `<div class="cmsg ${m.frm === "user" ? "me" : ""}">${m.frm === "user" ? "" : avatar(A(m.frm), 20)}<div><b>${esc(nm(m.frm))}</b><span data-notr>${esc(m.text)}</span></div></div>`).join("");
-    const ats = S.agents.filter(a => a.place === "office" && a.installed && a.billing !== "manual").map(a => `<button data-hat="${esc(a.name)}">${avatar(a, 18)}</button>`).join("");
+    const ats = S.agents.filter(a => a.place === "office" && a.installed && a.billing !== "manual" && !a.sealed).map(a => `<button data-hat="${esc(a.name)}">${avatar(a, 18)}</button>`).join("");
     return `<div class="hchat"><div class="hc-h"># ${esc(chatData.channel)}<button class="ib" data-go="chat" title="打开消息页">${icon("open")}</button></div>
       <div class="hc-list">${rows || `<div class="idle">还没有消息，@ 队员就能派活</div>`}</div>
       <div class="hc-ats">${ats}</div>
-      <div class="hc-in"><input id="hc-text" placeholder="@GPT 帮我…（回车发送）" value="${esc(chatDraft)}"><button data-hsend>${icon("chev")}</button></div></div>`;
+      <div class="hc-in"><input id="hc-text" placeholder="@GPT 帮我…（回车发送）" value="${esc(chatDraft)}"><button data-hsend>${icon("chev")}</button></div>${noteHTML2()}</div>`;
   }
   async function hudSend() {
     const inp = document.getElementById("hc-text"); const text = (inp && inp.value || "").trim(); if (!text) return;
-    chatDraft = ""; inp.value = "";
-    await fetch("/api/chat/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel: chatData ? chatData.channel : "大厅", text }) });
+    const res = await fetch("/api/chat/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel: chatData ? chatData.channel : "大厅", text }) }).then(x => x.json()).catch(() => null);
+    if (!res || !res.ok) return jobMsg(res && res.error || "连不上聊天室。请先确认消息是否已发出。");
+    if (!(res.issues && res.issues.length && !(res.jobs && res.jobs.length)) && chatDraft.trim() === text) {
+      chatDraft = "";
+      inp.value = "";
+    }
     loadChat();
   }
   panel.addEventListener("click", e => {
+    const action = e.target.closest("[data-dispatch-action]");
+    if (action) {
+      const agent = action.dataset.dispatchAgent;
+      const desktop = action.dataset.dispatchAction === "desktop";
+      if (desktop && !window.confirm(`要改用 ${A(agent).name} 桌面端吗？打开后请在桌面端继续交代任务。`)) return;
+      fetch(desktop ? "/api/open" : "/api/login", { method: "POST", body: JSON.stringify({ agent, how: "app" }) })
+        .then(r => r.json()).then(r => jobMsg(r.error || r.note || (desktop ? "已打开桌面端" : "已打开命令行登录")))
+        .catch(() => jobMsg("暂时无法打开，请在队员页重试。"));
+      return;
+    }
     const at = e.target.closest("[data-hat]");
     if (at) { const inp = document.getElementById("hc-text"); inp.value = (inp.value ? inp.value.replace(/\s*$/, " ") : "") + "@" + at.dataset.hat + " "; chatDraft = inp.value; inp.focus(); }
     if (e.target.closest("[data-hsend]")) hudSend();
   });
-  panel.addEventListener("input", e => { if (e.target.id === "hc-text") chatDraft = e.target.value; });
-  panel.addEventListener("keydown", e => { if (e.target.id === "hc-text" && e.key === "Enter" && !e.isComposing) { e.preventDefault(); hudSend(); } });
+  panel.addEventListener("input", e => { if (e.target.id === "hc-text") chatDraft = e.target.value; if (e.target.id === "job-text") jobDraft = e.target.value; });
+  panel.addEventListener("keydown", e => {
+    if (e.target.id === "hc-text" && e.key === "Enter" && !e.isComposing) { e.preventDefault(); hudSend(); }
+    if (e.target.id === "job-text" && e.key === "Enter" && !e.isComposing) { e.preventDefault(); jobSend(); }
+  });
+  async function jobSend() {
+    const t = jobDraft.trim(); if (!t || jobSubmitting) return;
+    const a = A(role), r = runOf(role);
+    if (r) return jobAct("/api/job/note", { text: t, interrupt: jobCut }, () => { jobDraft = ""; jobMsg(jobCut ? "已打断，按你说的接着做" : "发过去了，这一轮做完就照着改"); jobCut = false; });
+    // 闲着：走聊天室的 @ 派活（和消息页同一条路），回复会发回大厅
+    jobSubmitting = true;
+    const res = await fetch("/api/chat/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel: "大厅", agent: a.id, text: `@${a.name} ${t}` }) }).then(x => x.json()).catch(() => ({ error: "连不上聊天室。请确认大厅是否已收到这条消息。" }));
+    jobSubmitting = false;
+    if (role !== a.id) return;
+    if (res.error) return jobMsg(res.error);
+    if (!res.jobs || !res.jobs.length) {
+      const issue = (res.issues || [])[0];
+      return jobMsg(issue ? issue.text : "这单没派出去。请到聊天室大厅查看原因。", issue);
+    }
+    if (jobDraft.trim() === t) { jobDraft = ""; const i = document.getElementById("job-text"); if (i) i.value = ""; }
+    jobMsg(`已提交给 ${a.name}，等待启动。回复会发到聊天室大厅。`);
+  }
+  let jobSubmitting = false;
+  panel.addEventListener("change", e => { if (e.target.id === "job-cut") jobCut = e.target.checked; });
+  panel.addEventListener("click", e => {
+    if (e.target.closest("[data-jsend]")) return jobSend();
+    const st = e.target.closest("[data-jstop], [data-jtake]");
+    if (st) { // 点两下才生效，免得误触
+      const k = st.matches("[data-jstop]") ? "stop" : "take";
+      if (!sure(k)) { jobSure = { k, t: Date.now() }; panel.dataset.html = ""; render(); setTimeout(() => { if (jobSure && Date.now() - jobSure.t >= 3000) { jobSure = null; panel.dataset.html = ""; render(); } }, 3100); return; }
+      jobSure = null;
+      jobAct(st.matches("[data-jstop]") ? "/api/job/stop" : "/api/job/takeover", {}, () => jobMsg(st.matches("[data-jstop]") ? "已停掉，主位会收到通知" : "终端打开了，后台这单已停")); return;
+    }
+  });
   function officeTab(o) {
     const gs = o.groups.filter(g => g.active).concat(o.groups.filter(g => !g.active).slice(0, 3)); // 悬浮窗里只放在干活的 + 最近 3 个
     const ago = t => { const m = Math.round((Date.now() / 1000 - t) / 60); return m < 60 ? `${Math.max(1, m)} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`; };
@@ -307,7 +429,7 @@
     return `<div class="ph">${LOGO}<div class="tt">agentbus<span>${S.lead ? esc(A(S.lead).name) + " 办公室" : ""}</span></div>
         ${dock === "top" ? `<div class="tabs">${tabs}</div>` : ""}
         ${tab === "crew" && !ra ? `<div class="vt" title="收起时的样子"><button class="${view === "avatar" ? "on" : ""}" data-view="avatar" title="收起时：胶囊">${icon("pill")}</button><button class="${view === "scene" ? "on" : ""}" data-view="scene" title="收起时：小人">${icon("team")}</button></div>` : ""}
-        ${S.lead ? `<button class="ib lead-btn" data-openlead title="打开主位 ${esc(A(S.lead).name)}">${avatar(A(S.lead), 20)}</button>` : ""}
+        ${S.lead && !A(S.lead).sealed ? `<button class="ib lead-btn" data-openlead title="打开主位 ${esc(A(S.lead).name)}">${avatar(A(S.lead), 20)}</button>` : ""}
         <button class="ib" data-go="base" title="打开 agentbus 主界面">${icon("base")}</button><button class="ib" data-close title="收起">${icon("collapse")}</button></div>
       <div class="body tab-${ra ? "role" : of ? "office" : tab} ${view === "scene" ? "v-scene" : ""}">${body}</div>
       ${dock !== "top" ? `<div class="foot tabs">${tabs}</div>` : ""}`;
@@ -448,7 +570,7 @@
       if (dock === "top") panel.style.setProperty("--pw", Math.max(640, crew().length * 96 + 262) + "px"); // 宽度只跟上阵人数走，切标签不变
       // 侧边场景：竖着最多放 6 位，每位的高度按屏幕高度算，保证 6 位一屏放得下；超过 6 位才滑动
       else panel.style.setProperty("--ah", Math.max(70, Math.min(104, Math.floor(((screen.availHeight || 860) - 300) / 6))) + "px");
-      const typing = document.activeElement && document.activeElement.id === "hc-text";
+      const typing = document.activeElement && document.activeElement.id === "hc-text"; // 工作过程的输入框由 loadJob 自己恢复焦点
       if (!typing) set(panel, panelHTML()); // 正在消息框里打字：别重画面板，不然焦点和输入法会被打断
     }
     document.body.classList.toggle("troupe", troupe());
@@ -474,14 +596,14 @@
     setOpen(true, { pin: true });
   });
   panel.addEventListener("click", e => {
-    if (e.target.closest("[data-openlead]")) { const a = A(S.lead); fetch("/api/open", { method: "POST", body: JSON.stringify({ agent: a.id, how: a.open && a.open.app ? "app" : "cli" }) }); return; }
+    if (e.target.closest("[data-openlead]")) { const a = A(S.lead); if (!a.sealed) fetch("/api/open", { method: "POST", body: JSON.stringify({ agent: a.id, how: a.open && a.open.app ? "app" : "cli" }) }); return; }
     const go = e.target.closest("[data-go]");
     if (go) { invoke("open_main", { page: go.dataset.go }); if (!T) location.href = "/#" + go.dataset.go; return; }
     if (e.target.closest("[data-close]") || (e.target.closest(".ph") && !e.target.closest("button"))) { doneCard = null; role = null; officeSel = null; setOpen(false, { pin: false }); return; }
     const tb = e.target.closest("[data-tab]");
     if (tb) { tab = tb.dataset.tab; role = null; openMsg = null; if (tab !== "crew") refreshData(true); render(); pinned = true; clearTimeout(closeTimer); return; }
     const rl = e.target.closest("[data-role]");
-    if (rl) { role = rl.dataset.role; refreshData(); render(); pinned = true; clearTimeout(closeTimer); return; }
+    if (rl) { role = rl.dataset.role; jobView = null; jobLast = null; jobDraft = ""; refreshData(); render(); loadJob(); pinned = true; clearTimeout(closeTimer); return; }
     if (e.target.closest("[data-back]")) { role = null; officeSel = null; render(); return; }
     const or = e.target.closest("[data-openrole]");
     if (or) { fetch("/api/open", { method: "POST", body: JSON.stringify({ agent: role, how: or.dataset.openrole }) }); return; }

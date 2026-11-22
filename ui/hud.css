@@ -576,3 +576,37 @@ body[data-dock="top"] .pill .meta.brief { flex-shrink: 1; min-width: 0; }
 /* 侧边停靠的窄卡片：标题和说明可以换行，两边给右上角的 ✕ 留位置 */
 body[data-dock="left"] .ask .t b, body[data-dock="right"] .ask .t b, body[data-dock="left"] .ask .t i, body[data-dock="right"] .ask .t i { white-space: normal; overflow: visible; }
 body[data-dock="left"] .ask.note .t, body[data-dock="right"] .ask.note .t { padding: 0 12px; }
+
+/* 队员详情：这单的工作过程 */
+.jv { display: flex; flex-direction: column; gap: 6px; min-width: 0; grid-column: 2 / -1; }
+.jv-h { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+.jv-h em { font-style: normal; font-size: 10.5px; color: var(--ink-3); }
+.jv-b { margin-left: auto; display: flex; gap: 4px; }
+.jv-b button { font-size: 10.5px; padding: 3px 8px; border-radius: 7px; background: var(--glass-2); color: var(--ink-2); }
+.jv-b button.danger { color: #e05656; }
+.jv-l { max-height: 190px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; scrollbar-width: thin; background: var(--glass-2); border-radius: 10px; padding: 6px 8px; }
+.jv-e { display: grid; grid-template-columns: 50px 30px 1fr; gap: 4px; font-size: 10.5px; line-height: 1.45; }
+.jv-e span { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.jv-e i { font-style: normal; font-weight: 600; color: var(--ink-3); }
+.jv-e p { margin: 0; color: var(--ink-2); word-break: break-all; }
+.jv-e.do i { color: #4b8be0; } .jv-e.say i { color: #2f9e6b; } .jv-e.err i, .jv-e.err p { color: #e05656; } .jv-e.me i { color: #c08a1a; } .jv-e.think p { opacity: .75; }
+.jv-empty { font-size: 10.5px; color: var(--ink-3); padding: 6px 0; }
+.jv-in { display: flex; gap: 4px; }
+.jv-in input { flex: 1; min-width: 0; font-size: 11.5px; padding: 6px 9px; border-radius: 9px; background: var(--glass-2); color: var(--ink); border: 0; outline: none; }
+.jv-in button { width: 28px; border-radius: 9px; background: var(--glass-2); display: grid; place-items: center; }
+.jv-msg { font-size: 10.5px; color: var(--ink-2); }
+/* 详情页带工作过程：顶部停靠时高度跟内容走（固定 168 会把过程挤成一行） */
+body[data-dock="top"] .body.tab-role { height: auto; max-height: 440px; }
+body[data-dock="top"] .role .jv { grid-column: 2 / -1; }
+body[data-dock="top"] .jv-l { max-height: 220px; }
+
+/* 输入框 + 发送永远在过程上面；在干活时旁边一个醒目的停止 */
+.jv-in .send { width: auto; padding: 0 12px; font-size: 11.5px; font-weight: 600; color: #fff; background: #e9804a; }
+.jv-in .stop { width: auto; padding: 0 10px; font-size: 11.5px; font-weight: 600; color: #e05656; background: var(--glass-2); }
+.jv-opt { display: flex; align-items: center; gap: 10px; font-size: 10.5px; color: var(--ink-3); }
+.jv-opt label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.jv-opt button { margin-left: auto; font-size: 10.5px; color: var(--ink-2); background: none; text-decoration: underline; }
+.jv-note { font-size: 10.5px; color: var(--ink-3); }
+.jv-reply { font-size: 10.5px; color: var(--ink-2); }
+.jv-reply summary { cursor: pointer; }
+.jv-reply p { margin: 4px 0 0; max-height: 120px; overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; }

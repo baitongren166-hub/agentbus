@@ -310,26 +310,58 @@ def open_url(url):
         webbrowser.open(url)
 
 
-def open_terminal(cwd, line):
-    """开一个终端窗口，进项目文件夹再跑 line。"""
-    if IS_WIN:
-        if shutil.which("wt"):
-            subprocess.Popen(["wt", "-d", str(cwd), "cmd", "/k", line])
-        else:
-            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", f'cd /d "{cwd}" && {line}'])
-        return
-    import json
+def open_terminal(cwd, command, gate=None):
+    """打开终端运行命令。接管时等派活进程停止后才继续。"""
     import shlex
-    if not IS_MAC:  # Linux：常见终端挨个试
-        run = f"cd {shlex.quote(str(cwd))} && {line}; exec $SHELL"
+    if IS_WIN:
+        def literal(value):
+            return "'" + str(value).replace("'", "''") + "'"
+
+        script = f"Set-Location -LiteralPath {literal(cwd)}; "
+        if gate:
+            path = literal(gate)
+            script += (f"for ($i=0; $i -lt 30 -and !(Test-Path -LiteralPath {path}); $i++) {{ Start-Sleep 1 }}; "
+                       f"if (!(Test-Path -LiteralPath {path})) {{ Write-Host 'AgentBus takeover timed out'; return }}; "
+                       f"Remove-Item -LiteralPath {path}; ")
+        script += command if isinstance(command, str) else "& " + " ".join(map(literal, command))
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        shell = ["powershell.exe", "-NoLogo", "-NoExit", "-EncodedCommand", encoded]
+        if shutil.which("wt"):
+            subprocess.Popen(["wt", "-d", str(cwd), *shell])
+        else:
+            subprocess.Popen(shell, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        return
+    line = command if isinstance(command, str) else shlex.join(command)
+    if gate:
+        path = shlex.quote(str(gate))
+        line = (f'for i in {{1..30}}; do [ -f {path} ] && break; sleep 1; done; '
+                f'if [ ! -f {path} ]; then echo "AgentBus takeover timed out"; exit 1; fi; '
+                f'rm -f {path}; {line}')
+    if not IS_MAC:
+        run = f"cd {shlex.quote(str(cwd))} || exit 1; {line}; exec $SHELL"
         for term, args in (("x-terminal-emulator", ["-e", "bash", "-lc", run]), ("gnome-terminal", ["--", "bash", "-lc", run]),
                            ("konsole", ["-e", "bash", "-lc", run]), ("xfce4-terminal", ["-e", f"bash -lc {shlex.quote(run)}"]), ("xterm", ["-e", "bash", "-lc", run])):
             if shutil.which(term):
                 subprocess.Popen([term, *args], start_new_session=True)
                 return
         raise ValueError("没找到终端程序（x-terminal-emulator / gnome-terminal / konsole）")
-    script = f'tell application "Terminal"\n activate\n do script {json.dumps(f"cd {shlex.quote(str(cwd))} && {line}")}\nend tell'
-    subprocess.Popen(["osascript", "-e", script])
+    import tempfile
+    d = HOME / "terminal"
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for old in d.glob("*.command"):
+        try:
+            if time.time() - old.stat().st_mtime > 86400:
+                old.unlink()
+        except OSError:
+            pass
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".command", dir=d, delete=False) as script:
+        f = Path(script.name)
+        script.write(f"#!/bin/zsh -l\ncd {shlex.quote(str(cwd))} || exit 1\n{line}\nexec $SHELL -l\n")
+    f.chmod(0o700)
+    r = subprocess.run(["open", "-a", "Terminal", str(f)], capture_output=True, text=True)
+    if r.returncode:
+        f.unlink(missing_ok=True)
+        raise ValueError(f"打不开终端：{(r.stderr or '').strip()[:200]}")
 
 
 def reveal(path):

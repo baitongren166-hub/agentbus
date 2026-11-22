@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SEP = ";" if os.name == "nt" else ":"
 MODS = ["service", "agentbus", "mcp_server", "playbook", "wallet", "api_agent", "scheduler", "brains", "quota", "activity", "catalog", "config", "pf",
-        "chat", "setup", "update"]  # 都是函数里才 import 的，不写 PyInstaller 找不到
+        "chat", "jobs", "setup", "update"]  # 都是函数里才 import 的，不写 PyInstaller 找不到
 
 
 def triple():

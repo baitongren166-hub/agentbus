@@ -2,7 +2,7 @@
 
   oauth     agentbus 内置的浏览器授权（Gemini CLI：Google 登录，凭证存回 Gemini CLI 自己的位置）
   cli_bg    后台跑它自带的登录命令，它自己会打开浏览器（Codex、ZCode、Cursor Agent）
-  app       打开它的桌面应用，在应用里登录（WorkBuddy）
+  app       打开它的桌面应用，在应用里登录
   terminal  兜底：开一个终端窗口跑它的登录命令，照提示操作（OpenCode 要选供应商、填 key，只能交互）
 
 logged_in 按它自己存凭证的地方判断：True 已登录 / False 确定没登录 / None 判断不了。
@@ -48,7 +48,7 @@ def _codex_auth():
 
 
 LOGINS = {
-    "gemini": {"kind": "app", "app": "Antigravity", "label": "打开反重力登录", "note": "反重力在它自己的应用里用 Google 账号登录，登录一次命令行 agy 也能用。",
+    "gemini": {"kind": "terminal", "cmd": ["agy"], "label": "登录反重力 CLI", "note": "在终端里的反重力 CLI 按提示完成 Google 登录。",
                "logged_in": lambda: None},  # 对话目录在不代表账号还登着（退出登录后目录也还在）：判断不了就不下结论
     "codex": {"kind": "cli_bg", "cmd": ["codex", "login"], "label": "登录 ChatGPT",
               "logged_in": lambda: _codex_auth()},
@@ -57,9 +57,8 @@ LOGINS = {
     "opencode": {"kind": "terminal", "cmd": ["opencode", "auth", "login"], "label": "登录 / 添加供应商",
                  "note": "OpenCode 登录要选供应商、填 key，会开一个终端窗口，照里面的提示一步步选就行。",
                  "logged_in": lambda: _nonempty_json("~/.local/share/opencode/auth.json") or None},
-    "codebuddy": {"kind": "app", "app": "WorkBuddy", "label": "打开 WorkBuddy 登录", "logged_in": lambda: None},  # user-state.json 只是界面状态，不是登录凭证
-    "claude": {"kind": "terminal", "cmd": ["claude", "/login"], "label": "登录 Claude",
-               "logged_in": lambda: _keychain("Claude Code-credentials") or _exists("~/.claude/.credentials.json") or None},
+    "codebuddy": {"kind": "terminal", "cmd": ["codebuddy"], "label": "登录 CodeBuddy CLI",
+                  "note": "在打开的 CodeBuddy 终端输入 /login，按提示完成授权。", "logged_in": lambda: None},
     "qwen": {"kind": "terminal", "cmd": ["qwen"], "label": "登录 Qwen Code", "note": "会开一个终端窗口，按里面的提示选登录方式。",
              "logged_in": lambda: _nonempty_json("~/.qwen/oauth_creds.json") or None},
     "kimi": {"kind": "terminal", "cmd": ["kimi"], "label": "登录 Kimi CLI", "note": "会开一个终端窗口，按里面的提示登录。", "logged_in": lambda: None},
@@ -74,7 +73,17 @@ _start_lock = _th.Lock()
 
 def method(agent):
     """这位队员的登录方式。没登记的命令行 agent：兜底开终端跑它的主命令。"""
+    from config import sealed
+
+    if sealed(agent):
+        return None
     base = agent.get("clone_of") or agent.get("id")
+    if base == "doubao":
+        from config import doubao_cli_cmd
+        cmd = doubao_cli_cmd()
+        if cmd:
+            return {"id": base, "kind": "terminal", "cmd": [*cmd, "login", "--timeout", "300"],
+                    "label": "登录豆包 Headless", "note": "在终端里用手机豆包扫码授权。", "logged_in": lambda: None}
     m = LOGINS.get(base)
     if m:
         return dict(m, id=base)
@@ -98,9 +107,36 @@ def status(agent):
     return {"kind": m["kind"], "label": m["label"], "note": m.get("note"), "logged_in": li, "busy": bool(p and p.poll() is None)}
 
 
+def dispatch_action(agent, status_code, reply=""):
+    """派活失败后的操作选项，仅供用户主动选择。"""
+    from config import sealed
+    if not agent:
+        return None
+    if (agent.get("run") == "codebuddy" and status_code == "failed" and reply.startswith("（WorkBuddy 没有回复，退出码")
+            and "Please use /login command" in reply):  # 升级前的失败记录仍能打开 CLI 登录
+        status_code = "cli_login"
+    if status_code not in ("cli_login", "cli_unavailable") or sealed(agent):
+        return None
+    if status_code == "cli_login":
+        m = method(agent)
+        if m and m["kind"] in ("cli_bg", "terminal", "oauth"):
+            return {"kind": "login", "label": m["label"]}
+    if status_code == "cli_unavailable":
+        from catalog import OPENERS
+        import pf
+        opener = OPENERS.get(agent.get("clone_of") or agent.get("id"))
+        if opener and pf.app_exists(opener):
+            return {"kind": "desktop", "label": "询问使用桌面端"}
+    return None
+
+
 def start(agent, port=None):
     """开始登录。返回 {ok, kind, url?, note}：oauth 返回要打开的地址（服务端已打开），其余按方式启动。"""
     import pf
+    from config import CLAUDE_SEALED, sealed
+
+    if sealed(agent):
+        raise ValueError(CLAUDE_SEALED)
     m = method(agent)
     if not m:
         raise ValueError("这位队员不需要登录（API 队员用 key，网页版在网页里登录）")
@@ -128,8 +164,7 @@ def start(agent, port=None):
                 _running[m["id"]] = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **pf.group_kwargs())
             _logs[m["id"]] = f
         return {"ok": True, "kind": "cli_bg", "note": "浏览器会自动打开登录页，登录完回到 agentbus 就好（这里会自动刷新）。"}
-    import shlex
-    pf.open_terminal(Path.home(), " ".join(shlex.quote(x) for x in cmd))
+    pf.open_terminal(Path.home(), cmd)
     return {"ok": True, "kind": "terminal", "note": m.get("note") or "开了一个终端窗口，照里面的提示登录。"}
 
 

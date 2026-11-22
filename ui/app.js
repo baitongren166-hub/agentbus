@@ -208,13 +208,30 @@
       <div class="coin"><span class="ci">${icon("coin")}</span><div><b>${d.ok ? money(d.total) : "—"}</b><small>DeepSeek 金币${d.ok ? " · " + esc([...new Set((d.accounts || []).flatMap(x => x.used_by))].join("、")) + " 在用" : ""}</small></div></div>
       ${S.agents.some(a => a.billing === "claude" && a.installed) ? `<p class="small muted" style="margin:10px 0 0">Claude 额度看不到（订阅用量不对外开放）</p>` : ""}</div>`;
   }
+  function dispatchActionHTML(r) {
+    const a = r.action;
+    return a ? `<button class="btn sm" data-dispatch-action="${esc(a.kind)}" data-dispatch-agent="${esc(r.agent)}">${esc(a.label)}</button>` : "";
+  }
+  document.addEventListener("click", async e => {
+    const button = e.target.closest("[data-dispatch-action]");
+    if (!button) return;
+    e.preventDefault(); e.stopPropagation();
+    const agent = button.dataset.dispatchAgent;
+    if (button.dataset.dispatchAction === "login") {
+      const result = await api("/api/login", { agent });
+      if (result) toast(result.note || "已打开 CLI 登录", "open");
+    } else if (button.dataset.dispatchAction === "desktop" && await askBox(
+      `要改用 ${A(agent).name} 桌面端吗？`, "确认后打开应用。请在桌面端继续交代这单任务。", "打开桌面端")) {
+      if (await api("/api/open", { agent, how: "app" })) toast(`正在打开 ${A(agent).name} 桌面端`, "open");
+    }
+  }, true);
   function runningHTML() {
     const rows = S.running.map(r => { const a = A(r.agent); return `<div class="q">${ringAv({ ...a, state: "working" }, 34)}<div class="q-main">
         <div class="q-top"><b>${esc(a.name)}</b><span class="t" data-since="${r.start}"></span></div>
         <div class="q-task" data-notr>${esc(r.task)}</div>${r.queued ? `<span class="pill gold">⏳ ${esc(r.queued)}</span>` : a.acts && a.acts[0] ? `<div class="q-act">${esc(a.acts[0].plain)}</div>` : ""}${r.retry ? `<span class="pill gold">卡住过，第 ${r.retry} 次重试</span>` : ""}</div></div>`; }).join("");
     const recent = S.recent.slice(0, 3).map(r => { const a = A(r.agent); return `<div class="q">${avatar(a, 34)}<div class="q-main">
         <div class="q-top"><b>${esc(a.name)}</b><span class="t">${esc((r.t || "").slice(11, 16))}</span></div>
-        <div class="q-task" data-notr>${esc(r.text)}</div>${costText(r.cost) ? `<span class="pill ${r.cost.cny != null ? "gold" : "hp"}">${costText(r.cost)}</span>` : ""}</div></div>`; }).join("");
+        <div class="q-task" data-notr>${esc(r.text)}</div>${dispatchActionHTML(r)}${costText(r.cost) ? `<span class="pill ${r.cost.cny != null ? "gold" : "hp"}">${costText(r.cost)}</span>` : ""}</div></div>`; }).join("");
     return `<div class="card-h"><h2>进行中</h2>${S.running.length ? `<span class="pill hp">${S.running.length}</span>` : ""}<a class="more" href="#quests">全部 ${icon("chev")}</a></div>
       <div class="card-b">${rows || `<div class="empty"><div class="big">☕</div>暂时没有派出去的任务<br><span class="small">在主位里派活，这里和悬浮窗会实时出现</span></div>`}
       ${recent ? `<div class="small muted" style="margin:10px 0 2px">刚完成</div>${recent}` : ""}</div>`;
@@ -448,7 +465,7 @@
         ${skillPills(a) ? `<div class="qc-skills">${skillPills(a)}</div>` : ""}
         ${a.installed && a.billing !== "manual" && a.brain ? `<div class="qc-brain">${brainBtn(a)}</div>` : ""}
         <div class="qc-act">${openBtns(a, "sm")}${a.installed ? (a.place === "office" ? `<button class="btn sm" data-move="lounge" data-id="${esc(a.id)}">${icon("sofa")}去休息</button>` : `<button class="btn sm primary" data-move="office" data-id="${esc(a.id)}">${icon("star")}上阵</button>`) : a.install ? `<button class="btn sm primary" data-recruit="${esc(a.id)}">${icon("plus")}招募</button>` : a.get_url ? `<button class="btn sm primary" data-geturl="${esc(a.get_url)}">${icon("plus")}去官网下载</button>` : ""}
-          ${a.installed && S.lead !== a.id ? `<button class="btn sm" data-lead="${esc(a.id)}">👑 设为主位</button>` : ""}${a.installed && a.billing !== "manual" ? `<button class="btn sm ghost" data-msg="${esc(a.id)}">💬</button>` : ""}<a class="btn sm ghost" href="#hero/${encodeURIComponent(a.id)}">完整战备 ${icon("chev")}</a></div>`;
+          ${a.installed && !a.sealed && S.lead !== a.id ? `<button class="btn sm" data-lead="${esc(a.id)}">👑 设为主位</button>` : ""}${a.installed && !a.sealed && a.billing !== "manual" ? `<button class="btn sm ghost" data-msg="${esc(a.id)}">💬</button>` : ""}<a class="btn sm ghost" href="#hero/${encodeURIComponent(a.id)}">完整战备 ${icon("chev")}</a></div>`;
       tick(); place();
     };
     draw(null, null);
@@ -682,36 +699,9 @@
     if (r) { a.balance = { ...a.balance, on: r.on, result: r.result }; toast(!on ? "已关闭接入余额" : r.result && r.result.ok ? "余额接上了" : "链路没跑通，看看是哪一步"); }
     painted.hero = null; if (route.page === "hero") pHero();
   });
-  // Claude 封印：默认开。解封要先看风险说明再确认；重新封印随时一键
-  function sealPanel(a) {
-    return a.sealed
-      ? `<div class="seal-box"><b>🔒 已封印</b><span>${esc(a.name)} 只当主位：不接派活、不进聊天室、不查额度，任何能把它当队员唤醒的入口都关着。</span><button class="btn sm" data-unseal>解封…</button></div>`
-      : `<div class="seal-box open"><b>🔓 已解封</b><span>${esc(a.name)} 可以被派活、进聊天室、显示用量。</span><button class="btn sm" data-reseal>重新封印</button></div>`;
+  function sealPanel() {
+    return `<div class="seal-box"><b>🔒 已永久封印</b><span>AgentBus 已关闭 Claude 的桌面端、命令行、登录和派活入口。</span></div>`;
   }
-  document.addEventListener("click", async e => {
-    if (e.target.closest("[data-reseal]")) {
-      e.preventDefault();
-      if (await api("/api/settings", { claude_seal: true })) { S.settings.claude_seal = true; toast("已重新封印"); }
-      return;
-    }
-    if (e.target.closest("[data-unseal]")) {
-      e.preventDefault();
-      $("#layer").innerHTML = `<div class="sheet-bg" id="sheet-bg"><div class="modal seal-modal" role="dialog" aria-label="解封 Claude"><h2>解封 Claude？</h2>
-        <p>解封后，Claude 会像其他队员一样：能被主位或聊天室派活、能进群聊、能按职能被自动挑中，悬浮窗也会显示它的用量。</p>
-        <div class="warn-box"><b>⚠️ 会增加 Claude 的不稳定风险</b><ul>
-          <li>后台用命令行（claude -p）跑 Claude，可能因为没登录、额度用完或限流而失败。</li>
-          <li>它同时在当主位时，派给它的活会和你正在用的对话抢同一份订阅额度。</li>
-          <li>派活起的 Claude 会话多了，你自己的对话可能更容易撞到用量上限。</li></ul></div>
-        <p class="small muted">随时可以在这里重新封印。</p>
-        <div class="modal-act"><button class="btn ghost" data-seal-cancel>先不了</button><button class="btn primary danger" data-seal-ok>我了解风险，解封</button></div></div></div>`;
-      return;
-    }
-    if (e.target.closest("[data-seal-cancel]") || e.target.id === "sheet-bg" && $(".seal-modal")) { $("#layer").innerHTML = ""; return; }
-    if (e.target.closest("[data-seal-ok]")) {
-      $("#layer").innerHTML = "";
-      if (await api("/api/settings", { claude_seal: false })) { S.settings.claude_seal = false; toast("已解封"); }
-    }
-  });
   async function pHero() {
     const a = A(route.id);
     shell(`<a class="back" href="#team">${icon("chev", "flip")}全部队员</a><div class="hero" id="hero"></div>`);
@@ -729,9 +719,9 @@
     part("hero", $("#hero"), `
       <div class="hero-art" style="--c:${esc(a.color)}"><div class="hero-fig ${a.lihui ? "with-lh" : ""}">${a.lihui ? lihui(a, true) : ""}${figureHTML({ ...a, state: a.state === "off" ? "break" : a.state }, "desk")}</div>
         <div class="hero-plate"><h1>${esc(a.name)}</h1><p>${esc(a.vendor || "")} · ${esc(a.desc || "")}</p>
-          ${a.billing === "claude" ? sealPanel(a) : ""}${loginPanel(a)}${balancePanel(a)}${meterPickPanel(a)}
+          ${a.sealed ? sealPanel() : ""}${loginPanel(a)}${balancePanel(a)}${meterPickPanel(a)}
           <div class="row-pills">${statePill(a)}<span class="pill">${a.place === "office" ? "上阵中" : "休息室"}</span>${a.clone_of ? `<span class="pill accent">👥 分身</span>` : ""}${quotaPill(a)}</div>
-          <div class="hero-act">${act}${a.installed ? (S.lead === a.id ? `<span class="pill accent">👑 主位</span>` : `<button class="btn" data-lead="${esc(a.id)}">👑 设为主位</button>`) : ""}<a class="btn ghost" href="#quests" data-qa-go="${esc(a.id)}">${icon("quests")}任务记录</a>${a.installed && a.billing !== "manual" ? `<button class="btn ghost" data-msg="${esc(a.id)}">💬 留言</button>` : ""}</div>
+          <div class="hero-act">${act}${a.installed && !a.sealed ? (S.lead === a.id ? `<span class="pill accent">👑 主位</span>` : `<button class="btn" data-lead="${esc(a.id)}">👑 设为主位</button>`) : ""}<a class="btn ghost" href="#quests" data-qa-go="${esc(a.id)}">${icon("quests")}任务记录</a>${a.installed && !a.sealed && a.billing !== "manual" ? `<button class="btn ghost" data-msg="${esc(a.id)}">💬 留言</button>` : ""}</div>
           ${a.installed && (a.open.app || a.open.cli) ? `<div class="hero-act">${openBtns(a, "sm")}</div>` : ""}
           ${a.installed && a.billing !== "manual" ? `<div class="hero-act">${brainBtn(a)}${cloneBar(a)}${a.api ? `<button class="clone-chip x" data-api-x="${esc(a.id)}">解雇</button>` : ""}</div>` : ""}</div></div>
       <div class="hero-side">
@@ -774,20 +764,26 @@
   }
   // 弹层：上面是强度 + 模型（点开换模型），下面是胶囊拖动条
   async function brainMenu(anchor, a, view) {
-    closePop();
-    const o = await brainOf(a.id);
+    const under = anchor.closest("#pop");
+    if (under && !under.classList.contains("bp")) { $("#pop-under") && $("#pop-under").remove(); under.id = "pop-under"; } // 人物小卡留着，模型选择叠在上面
+    else closePop();
+    const o = await brainOf(a.id, true);
     const pop = document.createElement("div"); pop.className = "pop bp"; pop.id = "pop"; pop.dataset.agent = "brain:" + a.id;
     document.body.appendChild(pop);
     const nm = e => (o.names || {})[e] || e || "";
+    const brainPath = "/api/brain?agent=" + encodeURIComponent(a.id);
+    let modelView = false;
     const draw = (v, q = "") => {
+      modelView = v === "models";
       const { ch, cur, m, model, effs, eff } = effOf(o);
       if (v === "models") {
         const ms = (o.models || []).filter(x => !q || (x.id + " " + (x.name || "")).toLowerCase().includes(q));
         const groups = {}; ms.forEach(x => (groups[x.group || (x.id.includes("/") ? x.id.split("/")[0] : "")] ||= []).push(x));
-        pop.innerHTML = `<div class="bp-nav"><button data-bpback>${icon("chev", "flip")}</button><b>模型</b><button data-bfresh title="重新识别本机模型">${o.detecting ? "识别中…" : "刷新"}</button></div>
+        pop.innerHTML = `<div class="bp-nav"><button data-bpback>${icon("chev", "flip")}</button><b>模型</b><button data-bfresh title="重新识别本机模型" ${o.detecting ? "disabled" : ""}>${o.detecting ? "识别中…" : "刷新"}</button></div>
           ${(o.models || []).length > 8 ? `<label class="search bp-q">${icon("search")}<input placeholder="搜模型" value="${esc(q)}"></label>` : ""}
           <div class="dd-list">${q ? "" : `<button class="dd-it ${ch.model ? "" : "on"}" data-bm=""><b>默认</b><small>${esc(cur.model ? short(cur.model) : "跟随它自己")}</small></button>`}
-          ${Object.entries(groups).map(([g, xs]) => (g ? `<div class="dd-g">${esc(g)}</div>` : "") + xs.map(x => `<button class="dd-it ${ch.model === x.id ? "on" : ""}" data-bm="${esc(x.id)}"><b>${esc(x.group ? x.name : g ? String(x.name || x.id).replace(g + "/", "") : x.name || x.id)}</b></button>`).join("")).join("") || `<p class="small muted" style="padding:8px">没找到</p>`}</div>`;
+          ${Object.entries(groups).map(([g, xs]) => (g ? `<div class="dd-g">${esc(g)}</div>` : "") + xs.map(x => `<button class="dd-it ${ch.model === x.id ? "on" : ""}" data-bm="${esc(x.id)}"><b>${esc(x.group ? x.name : g ? String(x.name || x.id).replace(g + "/", "") : x.name || x.id)}</b></button>`).join("")).join("") || (o.free ? "" : `<p class="small muted" style="padding:8px">没找到</p>`)}</div>
+          ${o.free ? `<form class="bp-free" data-bpfree><input placeholder="输入模型 ID" value="${esc(ch.model || "")}"><button class="btn sm primary">用这个</button></form>` : ""}`;
         const inp = pop.querySelector(".bp-q input"); if (inp) { inp.oninput = () => { const v2 = inp.value; draw("models", v2.trim().toLowerCase()); const n = pop.querySelector(".bp-q input"); n.focus(); n.setSelectionRange(v2.length, v2.length); }; if (!q) inp.focus(); }
       } else {
         const i = Math.max(0, effs.indexOf(eff));
@@ -799,15 +795,45 @@
       pop.style.left = Math.max(12, Math.min(r.left, innerWidth - pop.offsetWidth - 12)) + "px";
       pop.style.top = (r.bottom + 6 + pop.offsetHeight > innerHeight - 12 ? Math.max(12, r.top - 6 - pop.offsetHeight) : r.bottom + 6) + "px";
     };
+    async function syncModels(result) {
+      for (let i = 0; result && result.detecting && i < 18; i++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if ($("#pop") !== pop) return;
+        result = await api(brainPath);
+      }
+      if ($("#pop") !== pop) return;
+      if (result) Object.assign(o, result, { chosen: o.chosen });
+      o.detecting = false;
+      if (modelView) {
+        const input = pop.querySelector(".bp-free input");
+        const draft = input?.value;
+        const editing = input && document.activeElement === input;
+        draw("models", (pop.querySelector(".bp-q input")?.value || "").trim().toLowerCase());
+        const next = pop.querySelector(".bp-free input");
+        if (next && draft !== undefined) {
+          next.value = draft;
+          if (editing) next.focus();
+        }
+      }
+    }
     pop.redraw = draw;
     draw(view || "main");
+    if (o.detecting) void syncModels(o);
+    pop.addEventListener("submit", async e => { // 自己填模型名（命令行有 --model 但没列可选值的 agent）
+      e.preventDefault(); const v = e.target.querySelector("input").value.trim();
+      if (await setBrain(a, { model: v })) draw("main");
+    });
     pop.addEventListener("click", async e => {
       if (e.target.closest("[data-bpmodels]")) return draw("models");
       if (e.target.closest("[data-bpback]")) return draw("main");
       const it = e.target.closest("[data-bm]"), be = e.target.closest("[data-be]"), fr = e.target.closest("[data-bfresh]");
-      if (it) { await setBrain(a, { model: it.dataset.bm }); draw("main"); }
-      if (be) { await setBrain(a, { effort: "" }); draw("main"); }
-      if (fr) { fr.textContent = "识别中…"; await api("/api/brain?fresh=1&agent=" + encodeURIComponent(a.id)); setTimeout(async () => { Object.assign(o, await brainOf(a.id, true)); if ($("#pop") === pop) draw("models"); }, 1500); }
+      if (it && await setBrain(a, { model: it.dataset.bm })) draw("main");
+      if (be && await setBrain(a, { effort: "" })) draw("main");
+      if (fr) {
+        o.detecting = fr.disabled = true;
+        fr.textContent = "识别中…";
+        await syncModels(await api(brainPath + "&fresh=1"));
+      }
     });
   }
   async function setBrain(a, patch) {
@@ -818,11 +844,13 @@
       if (b.effort && m && !m.efforts.includes(b.effort)) delete b.effort;
     }
     Object.keys(b).forEach(k => { if (!b[k]) delete b[k]; });
+    const saved = await api("/api/brain", { agent: a.id, ...b });
+    if (!saved) return false;
     o.chosen = b;
     const e = effOf(o);
     a.brain = { ...(a.brain || {}), set: !!(b.model || b.effort), name: (e.m && e.m.name) || short(e.model) || "默认", effort_name: (o.names || {})[e.eff] || e.eff || "" };
     painted.hero = null; if (route.page === "hero") pHero();
-    await api("/api/brain", { agent: a.id, ...b });
+    return true;
   }
   // 拖动条：按住拖，松手吸附到最近一档
   let capDrag = null;
@@ -931,9 +959,9 @@
     part("qlist", $("#q-list"), shown.length ? shown.map(q => {
       const a = A(q.agent), open = ui.openRun === q.run;
       return `<div class="qr" data-run="${esc(q.run)}">${avatar(a, 40)}<div style="min-width:0"><div class="tt" data-notr>${esc((q.task || "").split("\n")[0])}</div>
-        <div class="meta"><span>${esc(A(q.frm).name)} → ${esc(a.name)}</span>${q.tag ? `<span class="pill">${esc(q.tag)}</span>` : ""}${q.batch ? `<span class="pill">${esc(q.batch)}</span>` : ""}</div></div>
+        <div class="meta"><span>${esc(A(q.frm).name)} → ${esc(a.name)}</span>${q.backend === "cli" ? `<span class="pill">CLI</span>` : q.backend === "api" ? `<span class="pill">API</span>` : ""}${q.tag ? `<span class="pill">${esc(q.tag)}</span>` : ""}${q.batch ? `<span class="pill">${esc(q.batch)}</span>` : ""}</div></div>
         <div class="right"><span>${esc((q.t || "").slice(5, 16))}</span>${q.done ? `<span>${mins(q.seconds)}${costText(q.cost) ? " · " + costText(q.cost) : ""}</span>` : `<span class="pill hp">进行中</span>`}</div></div>
-        ${open ? `<div class="qd"><div class="blk"><b>交代</b>${U(q.task)}</div>${q.reply ? `<div class="blk"><b>回复</b>${U(q.reply)}</div>` : ""}</div>` : ""}`;
+        ${open ? `<div class="qd"><div class="blk"><b>交代</b>${U(q.task)}</div>${q.reply ? `<div class="blk"><b>回复</b>${U(q.reply)}${dispatchActionHTML(q)}</div>` : ""}</div>` : ""}`;
     }).join("") : `<div class="empty"><div class="big">📜</div>${S.project_key ? "这个项目还没有任务记录" : "通用工作区还没有任务记录"}</div>`);
   }
   document.addEventListener("click", e => {
@@ -978,7 +1006,7 @@
         <div class="offc-f">今天派活 ${o.today} 单 · 战备 ${o.lineup.office.length} 人${o.lineup.custom ? "（已调整）" : ""}</div></a>`;
     }).join("")}</div>` : `<div class="card"><div class="empty"><div class="big">🏢</div>现在没有 agent 在用 agentbus<br><span class="small">在 Claude、GPT 这些 agent 里接入 agentbus 后，每个都会有自己的办公室</span></div></div>`);
     // 新手入口：把 agentbus 接进各个 agent（注册 MCP），装一次，以后每个新对话都会在悬浮窗问要不要接入
-    const can = S.agents.filter(a => a.installed && !a.api && !a.clone_of && a.billing !== "manual" && ["claude", "codex", "opencode", "zcode", "gemini", "codebuddy", "qwen", "kimi", "cursor"].includes(a.id));
+    const can = S.agents.filter(a => a.installed && !a.sealed && !a.api && !a.clone_of && a.billing !== "manual" && ["codex", "opencode", "zcode", "gemini", "codebuddy", "qwen", "kimi", "cursor"].includes(a.id));
     const mode = (S.settings || {}).auto_join || "ask";
     if (!$("#join-card")) $("#offs").insertAdjacentHTML("afterend", `<div class="card" id="join-card" style="margin-top:16px"></div>`);
     part("joincard", $("#join-card"), `<div class="card-h"><h2>让 agent 接入 agentbus</h2></div><div class="card-b">
@@ -1125,12 +1153,13 @@
   const fileHTML = f => f.image && f.path.includes("/.agentbus/chat/files/")
     ? `<a class="cf img" href="/api/chat/file?p=${encodeURIComponent(f.path)}" target="_blank" title="${esc(f.path)}"><img src="/api/chat/file?p=${encodeURIComponent(f.path)}" alt=""></a>`
     : `<span class="cf" title="${esc(f.path)}">📎 ${esc(f.name || f.path.split("/").pop())}<em>${esc(f.path)}</em></span>`;
-  const msgHTML = (m, mini) => m.system ? `<div class="cm sys">${chatText(m.text)}</div>`
+  const msgHTML = (m, mini) => m.system ? `<div class="cm sys">${chatText(m.text)} ${AB.issueAction(m.issue)}</div>`
     : `<div class="cm ${m.frm === "user" ? "me" : ""} ${m.talk ? "talk" : ""}">${m.frm === "user" ? "" : avatar(A(m.frm), mini ? 24 : 32)}<div class="cb"><div class="cn">${esc(chatName(m.frm))}${m.talk ? `<em>群聊</em>` : ""}<span>${new Date(m.t * 1000).toTimeString().slice(0, 5)}</span></div>
         <div class="ct" data-notr>${chatText(mini ? m.text.slice(0, 300) + (m.text.length > 300 ? "…" : "") : m.text)}${(m.files || []).length ? `<div class="cfs">${m.files.map(fileHTML).join("")}</div>` : ""}</div></div></div>`;
   async function loadChat() {
-    const r = await fetch(`/api/chat?channel=${encodeURIComponent(ui.chat.channel)}`).then(x => x.json()).catch(() => null);
-    if (!r) return;
+    const channel = ui.chat.channel;
+    const r = await fetch(`/api/chat?channel=${encodeURIComponent(channel)}`).then(x => x.json()).catch(() => null);
+    if (!r || r.error || ui.chat.channel !== channel) return;
     ui.chat.data = r;
     if (route.page === "chat") paintChat();
     if (route.page === "base") paintMiniChat();
@@ -1178,11 +1207,24 @@
   }
   async function sendChat(fromMini) {
     const ta = $(fromMini ? "#mc-text" : "#ch-text"), text = ta.value.trim(); if (!text && !ui.chat.files.length) return;
-    ta.value = ""; const pop = $("#ch-pop"); if (pop) pop.hidden = true;
-    const files = ui.chat.files; ui.chat.files = []; paintAtt();
-    const r = await api("/api/chat/send", { channel: ui.chat.channel, text: text || "（附件）", files });
-    if (r && !r.jobs.length && !/@/.test(text) && (ui.chat.data.meta || {}).mode !== "talk" && !(ui.chat.data.meta || {}).duty) toast("发出去了（没 @ 人，也没值班的，所以没人回）", "check");
-    loadChat();
+    if (ta.dataset.sending) return;
+    ta.dataset.sending = "1";
+    try {
+      const pop = $("#ch-pop"); if (pop) pop.hidden = true;
+      const files = [...ui.chat.files];
+      const r = await api("/api/chat/send", { channel: ui.chat.channel, text: text || "（附件）", files });
+      if (r && r.ok) {
+        if (!(r.issues && r.issues.length && !(r.jobs && r.jobs.length))) {
+          if (ta.value.trim() === text) ta.value = "";
+          ui.chat.files = ui.chat.files.filter(f => !files.includes(f)); paintAtt();
+        }
+        loadChat();
+      }
+    } catch {
+      toast("连不上聊天室。请先刷新消息，确认内容是否已发出。", "close");
+    } finally {
+      delete ta.dataset.sending;
+    }
   }
   function insertAt(name, fromMini) {
     const ta = $(fromMini ? "#mc-text" : "#ch-text"), v = ta.value, i = ta.selectionStart, before = v.slice(0, i).replace(/@[^\s@]*$/, "");

@@ -1,12 +1,13 @@
 [package]
 name = "agentbus"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+serde_json = "1"
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 
 [profile.release]

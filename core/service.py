@@ -289,7 +289,6 @@ def art_info():
 
 # 各家命令行怎么注册 MCP：(检查是否已接入的参数, 判断方式, 添加的参数)；没有的就给一段配置让主人自己粘
 MCP_CONNECT = {
-    "claude": (["mcp", "get", "agentbus"], "rc", ["mcp", "add", "--scope", "user", "agentbus", "--"]),
     "codex": (["mcp", "get", "agentbus"], "rc", ["mcp", "add", "agentbus", "--"]),
     "codebuddy": (["mcp", "list"], "grep", ["mcp", "add", "-s", "user", "agentbus", "--"]),
 }
@@ -303,6 +302,9 @@ def connect_lead(aid=None):
     a = agents_dict(cfg).get(aid)
     if not a:
         raise ValueError("还没有主位：先到队员页给一位点「设为主位」")
+    from config import CLAUDE_SEALED, sealed
+    if sealed(a, cfg):
+        raise ValueError(CLAUDE_SEALED)
     cmd = pf.mcp_cmd()
     kind = a.get("run")
     spec = MCP_CONNECT.get(kind)
@@ -406,8 +408,11 @@ def a2a_rpc(req):
         cfg = load_config()
         target = meta.get("agent") or meta.get("skill") or meta.get("tag") or lead_of(cfg)
         ctx = msg.get("contextId") or "ctx-" + time.strftime("%m%d%H%M%S")
-        jid = mcp_server.start_job({"agent": target, "task": text, "tag": meta.get("tag") or meta.get("skill"), "project": meta.get("project"),
-                                    "new": not msg.get("contextId")}, env_extra={"AGENTBUS_CONV": "a2a-" + ctx, "AGENTBUS_SELF": "a2a"})
+        try:
+            jid = mcp_server.start_job({"agent": target, "task": text, "tag": meta.get("tag") or meta.get("skill"), "project": meta.get("project"),
+                                        "new": not msg.get("contextId")}, env_extra={"AGENTBUS_CONV": "a2a-" + ctx, "AGENTBUS_SELF": "a2a"})
+        except ValueError as exc:
+            return err(-32602, str(exc))
         return ok({"kind": "task", "id": jid, "contextId": ctx, "status": {"state": "submitted", "timestamp": now}})
     if method == "tasks/get":
         try:
@@ -425,9 +430,9 @@ def a2a_rpc(req):
 
 def brain_brief(cfg, aid, a):
     """名牌上的大脑：用的模型 + 思考强度；能不能在这里换。"""
-    opts = brains.options(a)
+    opts = brains.options(a, discover=False)
     mine = brains.chosen(cfg, aid)
-    if not opts["models"] and not opts.get("current"):
+    if _sealed_of(a, cfg) or not opts.get("switch") and not mine:
         return None
     m, e, info = brains.effective(mine, opts)
     return {"label": brains.label(mine, opts), "set": bool(mine), "switch": opts["switch"], "model": m, "effort": e,
@@ -441,6 +446,9 @@ def brain_options(aid, fresh=False):
         raise ValueError("不认识的 agent")
     o = dict(brains.options(a, fresh))
     o["chosen"] = brains.chosen(cfg, aid)
+    saved = o["chosen"].get("model")
+    if a.get("run") == "agy" and saved and not any(m["id"] == saved for m in o["models"]):
+        o["models"] = [*o["models"], {"id": saved, "name": saved, "efforts": []}]
     o["names"] = brains.EFFORT_NAME
     return o
 
@@ -547,6 +555,8 @@ def _record_lost_now(r):
         return
     now = time.time()
     text = f"（派活进程意外没了，{r.get('agent')} 没交回复：可能被杀掉、或电脑睡眠/重启。去产出目录看看做到哪了。）"
+    if r.get("doubao_run") and r.get("session"):
+        text += f" 豆包已受理，会话 {r['session']}，任务 {r['doubao_run']}。请在豆包核对这单状态再决定是否重派。"
     ledger_add({"id": r["id"], "project": r.get("project"), "batch": r.get("batch") or "", "agent": r.get("agent"), "billing": r.get("billing"),
                 "tag": r.get("tag"), "task": r.get("task"), "start": r.get("start") or now, "end": now, "seconds": round(now - (r.get("start") or now)),
                 "ok": False, "lost": True, "frm": r.get("frm") or "claude", "reply": text, "cost": {"ok": False, "note": "进程没了，没查额度"}, "conv": r.get("conv") or ""})
@@ -554,6 +564,10 @@ def _record_lost_now(r):
         fh.write(json.dumps({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": "reply", "frm": r.get("agent"), "to": r.get("frm") or "claude",
                              "text": text, "run": r.get("run"), "tag": r.get("tag"), "batch": r.get("batch"), "ok": False, "conv": r.get("conv") or ""},
                             ensure_ascii=False) + "\n")
+    if r.get("channel"):
+        import chat
+        aid = r.get("agent") or ""
+        chat.failure(r["channel"], agents_dict(load_config()).get(aid) or {"id": aid}, "lost", text)
 
 
 def build_rooms(running, sess, agents, cfg):
@@ -770,6 +784,8 @@ def open_tasks(recs):
 def state(project_name=None):
     project_name, _root, bus, batch = project(project_name)  # 不传就是当前项目（界面就是这么用的）
     cfg = load_config(project_name)
+    from logins import dispatch_action
+    roster = agents_dict(cfg)
     ps = projects()
     recs = board_tail(bus)
     tasks = open_tasks(recs)
@@ -779,8 +795,8 @@ def state(project_name=None):
         try:
             os.kill(int(r.get("pid") or 0), 0)
         except (OSError, ValueError):  # 派活的进程已经没了（被杀、机器重启）：记一条“没做成”，派活的人才知道
-            f.unlink(missing_ok=True)
             _record_lost(r)
+            f.unlink(missing_ok=True)
             continue
         if not r.get("title"):  # 老记录没有短标题：现场提炼一个（悬浮窗胶囊只显示它）
             from agentbus import short_title
@@ -794,7 +810,7 @@ def state(project_name=None):
     sess = activity.live_sessions()
     live_by = {x["agent"] for x in sess}
     agents = []
-    for aid, a in agents_dict(cfg).items():
+    for aid, a in roster.items():
         if a.get("hidden"):
             continue
         inst = installed(a)
@@ -837,7 +853,7 @@ def state(project_name=None):
                                  ("assets/avatars/robot.png" if (UI / "assets/avatars/robot.png").exists() else None),
                        "since": by_agent.get(aid, {}).get("start"), "desk": desk_art(a), "direct": st == "working" and aid not in by_agent,
                        "frames": anim_info(art), "lihui": lihui_of(art),
-                       "install": install_cmd(look, (cfg.get("settings") or {}).get("install_dir")) if (not inst or a.get("billing") == "manual") else None, "get_url": INSTALL_GUIDE.get(look) if not inst else None, "open": openers(look), "char": _art(f"char-{art}.png"), "lounge_art": _art(f"lounge-{art}.png"), "quota_text": quota_text(a), "meter": meter(a), "sealed": _sealed_of(a, cfg), "balance": _balance_ui(a, cfg), "login": _login_ui(a) if inst else None,
+                       "install": install_cmd(look, (cfg.get("settings") or {}).get("install_dir")) if not _sealed_of(a, cfg) and (not inst or a.get("billing") == "manual") else None, "get_url": INSTALL_GUIDE.get(look) if not inst and not _sealed_of(a, cfg) else None, "open": openers(look), "char": _art(f"char-{art}.png"), "lounge_art": _art(f"lounge-{art}.png"), "quota_text": quota_text(a), "meter": meter(a), "sealed": _sealed_of(a, cfg), "balance": _balance_ui(a, cfg), "login": _login_ui(a) if inst else None,
                        "clone_of": a.get("clone_of"), "brain": brain_brief(cfg, aid, a), "caps": a.get("caps") or [], "api": bool(a.get("api")), "generic": art == "api", "provider_name": prov_name, "brand": brand,
                        "cloneable": inst and not a.get("clone_of") and a.get("billing") != "manual" and a.get("run") not in (None, "doubao")})
     order = {aid: i for i, aid in enumerate(cfg["roster"]["office"] + cfg["roster"]["lounge"])}
@@ -858,6 +874,7 @@ def state(project_name=None):
         "running": live_costs(sorted([dict(r, name=agents_dict(cfg).get(r.get("agent"), {}).get("name", r.get("agent")))
                                       for r in running.values()], key=lambda r: r.get("start", 0))),
         "recent": [{"t": r.get("t"), "agent": r.get("frm"), "to": r.get("to"), "ok": r.get("ok", True), "project": r.get("project"), "tag": r.get("tag"), "text": activity.short(r.get("text"), 120),
+                    "action": dispatch_action(roster.get(r.get("frm")), r.get("status"), r.get("text") or ""),
                     "cost": r.get("cost"), "seconds": r.get("seconds"), "run": r.get("run")} for r in replies],
         "batches": batches(project_name),
         "project": project_name, "project_key": current_project(), "batch": batch,
@@ -891,7 +908,7 @@ def settings(cfg=None):
     for k in ("theme", "login", "install_dir", "tour_done", "setup_done", "auto_join", "lang"):
         if k in st:
             out[k] = st[k]
-    out["claude_seal"] = st.get("claude_seal", True) is not False  # 默认封印
+    out["claude_seal"] = True
     if pf.IS_WIN and not (st.get("hud") or {}).get("dock"):
         out["hud"]["dock"] = "right"  # Windows 没有刘海和菜单栏，默认贴右边的窄条，不挡窗口标题栏
     return out
@@ -929,8 +946,13 @@ def suggest(tag):
 
 def quests(project_name, limit=120):
     """任务记录：把派活（task）和回复（reply）按 run 配成一对。"""
-    _, _, bus, _ = project()
+    try:
+        project_name, _, bus, _ = project(project_name)
+    except SystemExit as exc:
+        raise ValueError(str(exc)) from exc
     recs = board_tail(bus, 1_500_000)
+    from logins import dispatch_action
+    roster = agents_dict(load_config(project_name))
     by_run, order = {}, []
     for r in recs:
         run = r.get("run")
@@ -941,20 +963,29 @@ def quests(project_name, limit=120):
             order.append(run)
         if r["kind"] == "task":
             q.update(t=r.get("t"), frm=r.get("frm"), agent=r.get("to"), task=activity.short(r.get("text"), 600),
-                     tag=r.get("tag"), batch=r.get("batch"))
+                     tag=r.get("tag"), batch=r.get("batch"), backend=r.get("backend"))
         else:
-            q.update(done=r.get("t"), reply=activity.short(r.get("text"), 1200), cost=r.get("cost"), seconds=r.get("seconds"))
+            q.update(done=r.get("t"), reply=activity.short(r.get("text"), 1200), cost=r.get("cost"), seconds=r.get("seconds"),
+                     action=dispatch_action(roster.get(r.get("frm")), r.get("status"), r.get("text") or ""))
     return [by_run[k] for k in order[::-1][:limit] if by_run[k].get("agent")]
 
 
 def openers(aid):
     """这个 agent 能一键打开什么：本机装了的桌面 App / 网页版 / 命令行。"""
+    from config import sealed
+
+    if sealed(aid):
+        return {"app": False, "cli": False}
     o = OPENERS.get(aid) or {}
     return {"app": pf.app_exists(o) or bool(o.get("web")), "cli": bool(o.get("cli") and pf.which(o["cli"]))}
 
 
 def open_agent(aid, how):
     """主位一键打开：桌面端（Mac open -a / Windows 找 exe）；命令行开一个终端窗口，进项目文件夹再启动。"""
+    from config import CLAUDE_SEALED, sealed
+
+    if sealed(aid):
+        raise ValueError(CLAUDE_SEALED)
     o = OPENERS.get(aid) or {}
     if how == "app":
         if pf.app_exists(o):
@@ -1038,10 +1069,10 @@ def draft_playbook():
     name, root, bus, _ = project()
     if name == GENERAL:
         raise ValueError("先选一个项目")
-    lead = lead_of(cfg) or "claude"
+    lead = lead_of(cfg)
+    if not lead or _sealed_of(lead, cfg):
+        raise ValueError("请先选择一位可用的主位来整理经验包。")
     brief, target, docs = draft_brief(name, root, bus)
-    if agents_dict(cfg).get(lead, {}).get("run") == "claude":  # 桌面端主位：在它自己的对话里做（后台 claude -p 没登录）
-        return {"lead": lead, "mode": "chat", "say": f"按项目文档重新整理「{name}」的 agentbus 经验包", "target": str(target), "docs": docs}
     JOBS = HOME / "jobs"
     JOBS.mkdir(parents=True, exist_ok=True)
     log = open(JOBS / f"playbook-{name}.log", "w")
@@ -1078,15 +1109,14 @@ def fit_playbook():
     pb = playbook.load(bus)
     if not pb:
         raise ValueError("这个项目还没有经验包")
+    lead = lead_of(cfg)
+    if not lead or _sealed_of(lead, cfg):
+        raise ValueError("请先选择一位可用的主位来整理经验包。")
     d = playbook.pb_dir(bus)
     ctx = d / ".fit-context.md"
     ctx.write_text(playbook.fit_context(pb, root, bus, cfg, agents_dict(cfg), ledger_read()), "utf-8")
     out = d / "proposal.json"
     out.unlink(missing_ok=True)
-    lead = lead_of(cfg) or "claude"
-    if agents_dict(cfg).get(lead, {}).get("run") == "claude":
-        # 主位是桌面端的 Claude：在它自己的对话里做（它通过 MCP 工具 agentbus_playbook_fit 拿材料），不另起后台进程
-        return {"lead": lead, "mode": "chat", "say": f"把「{name}」的经验包融入我的习惯"}
     brief = f"""你是主位。请帮主人把项目经验包「{pb['manifest'].get('name')}」融入他自己的工作习惯，给出一份装配建议。
 1. 读分析材料：{ctx}（经验包每一步、每条经验，主人习惯的出处，主人的阵容和派活记录）
 2. 逐个读材料里列出的“主人的习惯”文件，弄清主人自己的做法和偏好
@@ -1121,6 +1151,10 @@ _installs = {}
 def start_install(aid, install_dir=None):
     """一键招募：只跑 catalog 里定好的安装命令（可以换安装位置），日志在 ~/.agentbus/install/<agent>.log。"""
     import subprocess
+    from config import CLAUDE_SEALED, sealed
+
+    if sealed(aid):
+        raise ValueError(CLAUDE_SEALED)
     if install_dir is not None:  # 记住这次选的位置，以后找命令行工具也去那里找
         cfg = load_config()
         cfg.setdefault("settings", {})["install_dir"] = install_dir.strip() or None
@@ -1319,7 +1353,7 @@ def quota_text(a):
     if b == "deepseek":
         d = _quota["deepseek"]
         return f"¥{d['total']:.1f}" if d.get("ok") else "金币 —"
-    if b == "claude":  # 封印时写清楚；解封后显示从本机记录数的用量
+    if b == "claude":
         m = meter(a)
         return m["main"]
     return {"free": "免费", "manual": "网页版"}.get(b, "")
@@ -1333,7 +1367,9 @@ _cache = {}
 
 
 def cached_state(project_name=None):
-    project_name = current_project()  # 所有界面看同一个“当前项目”
+    project_name = current_project() if project_name is None else project_name
+    if project_name and project_name != GENERAL and project_name not in projects():
+        raise ValueError("没有这个项目")
     with _lock:
         c = _cache.get(project_name)
         if c and time.time() - c[0] < 1.5:
@@ -1448,7 +1484,10 @@ class Handler(SimpleHTTPRequestHandler):
             traceback.print_exc()
             try:
                 status = 400 if isinstance(e, (ValueError, KeyError, TypeError)) else 500
-                self._json({"error": f"{type(e).__name__}: {e}"[:300], "id": eid}, status)
+                if urlparse(self.path).path.startswith("/api/chat"):
+                    self._json({"error": "聊天室暂时无法处理请求。请先刷新消息，确认内容是否发出。", "id": eid}, status)
+                else:
+                    self._json({"error": f"{type(e).__name__}: {e}"[:300], "id": eid}, status)
             except Exception:
                 pass
 
@@ -1504,6 +1543,18 @@ class Handler(SimpleHTTPRequestHandler):
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         if u.path == "/api/state":
             return self._json(cached_state(q.get("project")))
+        if u.path == "/api/job":  # 一单活的工作过程（悬浮窗、主界面队员详情用）
+            import jobs
+            rec = jobs.find(q.get("id", ""))
+            if not rec and q.get("agent"):  # 只给了队员：取他最早开工的那单
+                rs = sorted((r for r in (jobs.find(f.stem) for f in (HOME / "running").glob("*.json")) if r and r.get("agent") == q["agent"]),
+                            key=lambda r: r.get("start", 0))
+                rec = rs[0] if rs else None
+                if not rec:  # 没在干活：给看最近做完的那一单（只读）
+                    a = agents_dict(load_config()).get(q["agent"]) or {}
+                    buses = [HOME / "general"] + [Path(v["bus"]) for k, v in projects().items() if not k.startswith("_") and isinstance(v, dict) and v.get("bus")]
+                    return self._json({"job": None, "last": jobs.last_done(q["agent"], a.get("run"), list(dict.fromkeys(map(str, buses))))})
+            return self._json({"job": jobs.view(rec) if rec else None})
         if u.path == "/api/catalog":
             return self._json(catalog())
         if u.path == "/api/events":
@@ -1564,7 +1615,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not chat.valid(ch):
                 return self._json({"error": "频道名不对"}, 400)
             mt = chat.meta(ch)
-            return self._json({"channels": chat.channels(), "channel": ch, "messages": chat.read(ch, int(q.get("n") or 200)),
+            return self._json({"channels": chat.channels(), "channel": ch, "messages": chat.display_messages(chat.read(ch, int(q.get("n") or 200))),
                                "meta": {k: mt.get(k) for k in ("mode", "duty", "members", "rounds", "compressions")}, "talking": bool(mt.get("talk_pid") and _alive(mt["talk_pid"])),
                                "usage": chat.usage(ch), "talk_members": chat.talk_members(ch), "running": len(chat.running(ch)),
                                "duty_now": chat.resolve_duty(mt.get("duty")), "limits": chat.lim(), "max_rounds": chat.TALK_ROUNDS})
@@ -1613,7 +1664,8 @@ class Handler(SimpleHTTPRequestHandler):
             threading.Thread(target=lambda: (time.sleep(0.3), _server and _server.shutdown()), daemon=True).start()
             return
         if u.path == "/api/health":
-            return self._json({"ok": True, "app": "agentbus", "loop_age": round(time.time() - _loop_beat["t"]) if _loop_beat["t"] else None})
+            from update import VERSION
+            return self._json({"ok": True, "app": "agentbus", "version": VERSION, "loop_age": round(time.time() - _loop_beat["t"]) if _loop_beat["t"] else None})
         return super().do_GET()
 
     def sse(self, project_name):
@@ -1706,9 +1758,15 @@ class Handler(SimpleHTTPRequestHandler):
             if not text:
                 return self._json({"error": "写点内容"}, 400)
             files = [x for x in data.get("files") or [] if isinstance(x, dict) and x.get("path")][:10]
-            msg, jobs = chat.send(data.get("channel") or "大厅", text, cwd=data.get("cwd") or None, files=files)
+            channel = data.get("channel") or "大厅"
+            if not chat.valid(channel):
+                return self._json({"error": "找不到这个频道。请从频道列表重新选择。"}, 400)
+            issues = []
+            target = data.get("agent")
+            msg, jobs = chat.send(channel, text, cwd=data.get("cwd") or None, files=files,
+                                  target=target if isinstance(target, str) else None, issues=issues)
             _cache.clear()
-            return self._json({"ok": True, "message": msg, "jobs": jobs})
+            return self._json({"ok": True, "message": msg, "jobs": jobs, "issues": issues})
         if u.path == "/api/chat/settings":  # 频道设置：模式（派活 / 群聊）、值班的人、群聊成员和轮数
             import chat
             ch = data.get("channel") or "大厅"
@@ -1725,6 +1783,42 @@ class Handler(SimpleHTTPRequestHandler):
                 else:
                     d = chat.resolve_duty(chat.meta(ch).get("duty"))
                     chat.append(ch, "agentbus", f"🔀 这个频道改成了「派活」：@ 谁谁干活，干完把结果发回群里；没 @ 人时交给 {names.get(d, '没人（只记录）') if d else '没人（只记录）'}。", system=True)
+            return self._json({"ok": True})
+        if u.path in ("/api/job/stop", "/api/job/note", "/api/job/takeover"):  # 主人直接管一单活：停止、补充、接管
+            import jobs
+            rec = jobs.find(data.get("id", ""))
+            if not rec:
+                return self._json({"error": "这单已经做完了或者不存在"}, 404)
+            try:
+                if u.path == "/api/job/stop":
+                    jobs.stop(rec)
+                elif u.path == "/api/job/note":
+                    jobs.add_note(rec, data.get("text", ""), bool(data.get("interrupt")))
+                else:  # 终端启动后才停止后台，后台进程退出后终端接续会话
+                    from config import CLAUDE_SEALED, sealed
+                    if sealed(rec.get("agent") or "") or rec.get("kind") == "claude":
+                        raise ValueError(CLAUDE_SEALED)
+                    sid = jobs.session_of(rec)
+                    cmd = jobs.resume_cmd(rec.get("kind"), sid)
+                    if not cmd:
+                        raise ValueError("这位队员的会话续不上（没有会话号或者它不支持续会话）")
+                    from uuid import uuid4
+                    pr = projects().get(rec.get("project") or "") or {}
+                    gates = HOME / "terminal"
+                    gates.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    for old in gates.glob("takeover-*.ready"):
+                        if time.time() - old.stat().st_mtime > 86400:
+                            old.unlink(missing_ok=True)
+                    ready = gates / f"takeover-{uuid4().hex}.ready"
+                    pf.open_terminal(pr.get("root") or str(Path.home()), cmd, gate=ready)
+                    if not jobs.stop(rec, takeover=True):
+                        raise ValueError("工单已结束或后台进程未响应，终端不会接管。")
+                    timer = threading.Timer(6, ready.touch)
+                    timer.daemon = True
+                    timer.start()
+            except (ValueError, OSError) as e:
+                return self._json({"error": str(e)}, 400)
+            _cache.clear()
             return self._json({"ok": True})
         if u.path == "/api/chat/stop":
             import chat
@@ -1882,18 +1976,18 @@ class Handler(SimpleHTTPRequestHandler):
             save_config(cfg)
             _cache.clear()
             return self._json({"ok": True, "personal": len(personal["lessons"]), "adapt": len(personal["steps"])})
-        if u.path == "/api/playbook/merge":  # 把导入的经验包融合进本地文档：交给主位（桌面端在它自己的对话里做）
+        if u.path == "/api/playbook/merge":
             import playbook
             cfg = load_config()
             name, root, bus, _ = project()
             pb = playbook.load(bus)
             if not pb:
                 return self._json({"error": "还没有经验包，先导入"}, 400)
-            lead = lead_of(cfg) or "claude"
+            lead = lead_of(cfg)
+            if not lead or _sealed_of(lead, cfg):
+                return self._json({"error": "请先选择一位可用的主位来整理经验包。"}, 400)
             ctx = playbook.merge_context(pb, root, bus)
             (playbook.pb_dir(bus) / ".merge-context.md").write_text(ctx, "utf-8")
-            if agents_dict(cfg).get(lead, {}).get("run") == "claude":
-                return self._json({"lead": lead, "mode": "chat", "say": f"把导入的「{pb['manifest'].get('name')}」经验包融合进本地文档"})
             import subprocess
             subprocess.Popen([*pf.cli_cmd(), "-p", name, "ask", lead, ctx + "\n\n先只写出融合建议（三类），不要直接改文件，等主人确认。", "--new", "--tag", "复盘总结"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(root), **pf.group_kwargs())
@@ -2031,6 +2125,9 @@ class Handler(SimpleHTTPRequestHandler):
         elif u.path == "/api/lead":
             if data.get("agent") not in agents_dict(cfg):
                 return self._json({"error": "不认识的 agent"}, 400)
+            if _sealed_of(data["agent"], cfg):
+                from config import CLAUDE_SEALED
+                return self._json({"error": CLAUDE_SEALED}, 403)
             cfg["roster"]["lead"] = data["agent"]
             from config import LEAD_FILE
             LEAD_FILE.unlink(missing_ok=True)  # 手动指定的马上生效；之后谁再来统筹，自动主位会再跟过去
@@ -2069,8 +2166,11 @@ class Handler(SimpleHTTPRequestHandler):
                         mp[k] = [str(x) for x in v][:4]
                     else:
                         mp.pop(k, None)
-            if "claude_seal" in data:  # 解封要在界面上确认过风险；重新封印随时可以
-                st["claude_seal"] = bool(data["claude_seal"])
+            if "claude_seal" in data:
+                from config import CLAUDE_SEALED
+                if data["claude_seal"] is not True:
+                    return self._json({"error": CLAUDE_SEALED}, 403)
+                st["claude_seal"] = True
             if "scheduler" in data:  # {"screen_lock": bool, "limits": {计费: n}}
                 sc = cfg.setdefault("scheduler", {})
                 if "screen_lock" in data["scheduler"]:

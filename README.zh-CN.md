@@ -3,7 +3,7 @@
 <h1 align="center">agentbus</h1>
 
 <p align="center"><b>别再在多个 AI 窗口之间当传话筒。</b><br>
-agentbus 把你电脑上已经装好的 agent —— Claude Code、Codex、Antigravity、ZCode、OpenCode、WorkBuddy，以及任何兼容 OpenAI 的 API —— 组成一支会协作的队伍：一位<b>主位</b>统筹，队员用各自的本地能力同时开工，做完自动回报，每一单都按你真实的额度记账。</p>
+agentbus 把你电脑上已经装好的 agent —— Codex、Antigravity、ZCode、OpenCode、WorkBuddy，以及任何兼容 OpenAI 的 API —— 组成一支会协作的队伍：一位<b>主位</b>统筹，队员用各自的本地能力同时开工，做完自动回报，每一单都按你真实的额度记账。</p>
 
 <p align="center"><a href="README.md">English</a> · <b>中文</b></p>
 
@@ -57,7 +57,7 @@ agentbus 是装在本机的一层"办公室"。你照常和手边的 agent 说�
 在频道里 `@队员` 就是派活；队员回复里再 `@` 别人，活就接力下去，不用你转述。群聊模式下队员轮流讨论，聊长了自动压缩成要点。
 
 ### 记账和安全护栏
-每一单都记下用时、订阅额度和花费。订阅额度见底就停下，不会悄悄扣付费 credits。队员长时间没动静，看门狗会开新会话重试。Claude 默认**封印**（不接派活、不记账），可以在它的队员页解封。
+每一单都记下用时、订阅额度和花费。订阅额度见底就停下，不会悄悄扣付费 credits。队员长时间没动静，看门狗会开新会话重试。Claude 在 AgentBus 中永久封印。
 
 ## 截图
 
@@ -76,7 +76,7 @@ agentbus 是装在本机的一层"办公室"。你照常和手边的 agent 说�
 
 | agent | 怎么派活 | 额度 / 花费 |
 |---|---|---|
-| Claude Code | 主位；当队员默认封印（可在队员页解封） | 本机 token 用量 |
+| Claude Code | 在 AgentBus 中永久封印 | — |
 | Codex CLI（GPT） | `codex exec` | 5 小时 / 每周订阅额度 |
 | Antigravity | `agy -p` | 从 Antigravity 应用读每个模型的额度 |
 | OpenCode、ZCode、DeepSeek Harness | 命令行 | DeepSeek 余额 |
@@ -127,7 +127,7 @@ ln -s ~/agentbus/core/agentbus.py ~/.local/bin/agentbus   # 命令行（可选�
 
 1. 打开 agentbus。第一次启动会看看你装了哪些 agent，配好阵容，再走一遍新手引导。
 2. 在你常用的 agent 里开个对话、发一句话，悬浮窗会问要不要接入，点 **接入**。
-   （也可以注册一次 MCP：`claude mcp add --scope user agentbus -- python3 ~/agentbus/core/mcp_server.py`。）
+   如需在支持的客户端中手动注册 MCP，服务器名称填 `agentbus`，命令填 `python3`，参数填 `~/agentbus/core/mcp_server.py`。
 3. 用大白话跟主位说：
    - "办公室里都有谁？额度还剩多少？"
    - "同时安排：GPT 画三张插画，Antigravity 写文案，两个都做完告诉我。"

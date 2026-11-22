@@ -9,7 +9,7 @@ import urllib.request
 
 from config import HOME, load_config, load_json, save_json
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 DEFAULT_REPO = "baitongren166-hub/agentbus"  # 开源后填成正式仓库，比如 "someone/agentbus"
 CACHE = HOME / "update.json"
 EVERY = 6 * 3600

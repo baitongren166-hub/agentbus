@@ -159,5 +159,15 @@ if (/Windows/i.test(navigator.userAgent)) document.documentElement.classList.add
   const resetText = ts => { if (!ts) return ""; const d = new Date(ts * 1000), n = new Date(); const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; return d.toDateString() === n.toDateString() ? `今天 ${hm} 恢复` : `${d.getMonth() + 1}/${d.getDate()} ${hm} 恢复`; };
 
   const U = s => `<span data-notr>${esc(s)}</span>`; // 用户自己写的内容（任务、回复、消息）：不翻译
-  g.AB = { U, tr: g.I18N.tr, lang: g.I18N.lang, brandMark, icon, robot, esc, avatar, STATE, LEVEL, BILLING, money, mins, clock, costText, resetText };
+  function issueAction(issue, hud = false) {
+    const a = issue && issue.action;
+    if (!a || !a.label) return "";
+    if ((a.kind === "login" || a.kind === "desktop") && a.agent) {
+      return `<button class="${hud ? "fb" : "btn sm"}" data-dispatch-action="${a.kind}" data-dispatch-agent="${esc(a.agent)}">${esc(a.label)}</button>`;
+    }
+    if (a.kind !== "page" || !/^(?:team|quests|report|hero\/[\w%.~-]+)$/.test(a.page || "")) return "";
+    return hud ? `<button class="fb" data-go="${esc(a.page)}">${esc(a.label)}</button>`
+      : `<a class="btn sm" href="#${esc(a.page)}">${esc(a.label)}</a>`;
+  }
+  g.AB = { U, issueAction, tr: g.I18N.tr, lang: g.I18N.lang, brandMark, icon, robot, esc, avatar, STATE, LEVEL, BILLING, money, mins, clock, costText, resetText };
 })(window);

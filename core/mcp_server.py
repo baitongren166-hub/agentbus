@@ -15,7 +15,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import quota  # noqa: E402
 from catalog import LEVELS  # noqa: E402
-from config import HOME, agents_dict, bill, load_config, project, resolve_tag, save_config, who  # noqa: E402
+from config import HOME, DISPATCH_RULE, agents_dict, bill, load_config, project, resolve_tag, save_config, who  # noqa: E402
 
 JOBS = HOME / "jobs"
 CLI = HERE / "agentbus.py"
@@ -37,7 +37,7 @@ TOOLS = [
     {"name": "agentbus_move", "description": "把 agent 调进办公室（office，上岗）或休息室（lounge）。",
      "inputSchema": {"type": "object", "properties": {"agent": {"type": "string"}, "place": {"type": "string", "enum": ["office", "lounge"]}},
                      "required": ["agent", "place"]}},
-    {"name": "agentbus_dispatch", "description": "派活：agent 填名字或岗位词条（按偏好自动挑人；Claude 不接派活）。后台运行，立刻返回 job id。"
+    {"name": "agentbus_dispatch", "description": "派活：agent 填名字或岗位词条（按偏好自动挑人；Claude 不接派活）。后台运行，立刻返回 job id。" + DISPATCH_RULE +
                                                    "要在做完/失败时被叫醒：接着用 Bash 后台（run_in_background）跑返回里给的 `agentbus wait <job id>`，它一结束你就会收到结果，不用主人提醒。",
      "inputSchema": {"type": "object", "properties": {
          "agent": {"type": "string"}, "task": {"type": "string", "description": "一句话交代"},
@@ -155,7 +155,8 @@ def gate(args):
 
 
 NOT_JOINED = ("这个窗口没有接入 agentbus（主人没点接入，或者设置了不自动接入）：当没有 agentbus，正常干活，不要再调别的 agentbus 工具。"
-              "主人之后说“接入 agentbus / 用 bus”时，再调 agentbus_hello 并传 explicit=true。")
+              "主人之后说“接入 agentbus / 用 bus”时，再调 agentbus_hello 并传 explicit=true。"
+              "主人要求通过 Bus 派活时，先说明未接入。" + DISPATCH_RULE)
 
 
 def hello(args):
@@ -215,11 +216,27 @@ def hello(args):
             pass
         lines.append("学到新规矩（主人新定的、踩坑总结的）：用 `agentbus lesson propose \"一句话\" --tags 职能` 提议进经验包，主人在「经验」页采纳；只写进文档的话，下次派活队员拿不到。")
     lines.append("派活规则：用 agentbus_dispatch 或 `agentbus ask`，带上 --tag 职能（或环境变量 AGENTBUS_TAG）——会自动注入经验包那一步的做法；录屏、操控电脑的活会自动排队等屏幕。Claude 不接派活。")
+    lines.append(DISPATCH_RULE)
+    lines.append("按岗位派，别按记忆里的名字派：谁能干什么以上面这份战备为准。项目文档、记忆里写死的“某某做某事、要主人手动转交”只是当时的分工；"
+                 "一个岗位上有能命令行派活的队员，就直接派给他，不要自己写文档让主人转交。之后队伍有变化（谁能派活了、换了模型、换了岗位），"
+                 "agentbus 会在你下一句话前用「队伍变化」告诉你。")
     lines.append("回音规则：派出去的活一定要能叫醒你——要么 Bash 后台跑 `agentbus ask …`（做完就结束），要么 agentbus_dispatch 之后 Bash 后台跑 `agentbus wait <job id>`。"
                  "不要干等、也不要等主人提醒；新结果也会附在之后任何一个 agentbus 工具的返回里。")
     from config import update_json as _uj
     conv_k = _conv_key()
-    _uj(JOINED, lambda j: j[conv_k].__setitem__("briefed", True) if conv_k in j else None)  # 握手生成好了：钩子不用再塞一遍
+    try:  # 记下这次告诉主位的队伍样子：以后有变化，钩子在下一句话前补一条「队伍变化」
+        from agentbus import roster_print
+        rp = roster_print()
+    except Exception:
+        rp = None
+    def mark_briefed(joined):
+        record = joined.get(conv_k)
+        if record is not None:
+            record["briefed"] = True
+            if rp is not None:
+                record["roster"] = rp
+
+    _uj(JOINED, mark_briefed)  # 握手生成好了：钩子不用再塞一遍
     return "\n".join(lines)
 
 
@@ -234,18 +251,26 @@ def run_cli(*args):
 
 
 def dispatch(args):
-    agents = agents_dict(load_config())
-    from config import sealed
-    if sealed(agents.get(args.get("agent")) or {}):
-        return "Claude 只当主位，不接派活：这件事你自己做，或者派给别的队员。"
-    jid = start_job(args)
-    return (f"已派出，job id：{jid}。\n"
+    try:
+        jid = start_job(args)
+    except ValueError as exc:
+        return str(exc)
+    return (f"已提交派活请求，job id：{jid}。\n"
             f"现在就用 Bash 后台（run_in_background）跑：agentbus wait {jid}\n"
-            "——它在这单做完或失败时结束，你会被自动叫醒拿到回复，不要等主人提醒；同时可以接着干别的。")
+            "——它在这单做完或失败时结束，你会被自动叫醒拿到回复，不要等主人提醒；同时可以接着干别的。\n"
+            + DISPATCH_RULE)
 
 
 def start_job(args, env_extra=None, cwd=None):
     """后台派活，返回 job id。MCP 和 A2A 接口共用。"""
+    from config import CLAUDE_SEALED, sealed
+
+    target = str(args.get("agent") or "").casefold()
+    if target == "claude" or any(
+        target in (aid.casefold(), agent["name"].casefold()) and sealed(agent)
+        for aid, agent in agents_dict(load_config()).items()
+    ):
+        raise ValueError(CLAUDE_SEALED)
     JOBS.mkdir(parents=True, exist_ok=True)
     jid = time.strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     import pf

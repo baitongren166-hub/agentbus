@@ -182,7 +182,10 @@ def agents_dict(cfg=None):
 
 
 def cli_ready(agent):
-    return bool(agent.get("bin") and shutil.which(agent["bin"]))
+    import pf
+    command = agent.get("cmd") if agent.get("run") == "generic" else None
+    executable = command[0] if command else agent.get("bin")
+    return bool(executable and pf.which(executable))
 
 
 def installed(agent):
@@ -190,14 +193,33 @@ def installed(agent):
         import wallet
         return agent.get("account") in wallet.accounts()
     if agent["run"] == "doubao":
-        return Path(doubao_remote()).exists()
+        return bool(doubao_cli_cmd())
     if agent.get("billing") == "manual" or agent.get("web_fallback"):
         return True
-    return bool(agent.get("bin") and shutil.which(agent["bin"]))
+    return cli_ready(agent)
 
 
-def doubao_remote():
-    return load_json(CONFIG, {}).get("doubao_remote") or str(HOME / "doubao-remote.mjs")  # 豆包遥控脚本（CDP），config.json 里可以改位置
+def dispatch_backend(agent):
+    if not agent.get("run") or agent.get("billing") == "manual" or not installed(agent):
+        return None
+    return "api" if agent["run"] == "api" else "cli"
+
+
+DISPATCH_RULE = ("默认通过 AgentBus 的 CLI 派活，已配置的 API 队员按原路派活。CLI 未登录时，把 AgentBus 的 CLI 登录选项交给用户。"
+                 "只有确认 CLI 无法使用时才询问是否改用桌面端，等用户明确同意后再打开桌面端或发送任务。")
+
+
+def doubao_cli_cmd():
+    """找到已安装的 CLI，并显式选择无头后端。"""
+    import pf
+    configured = load_json(CONFIG, {}).get("doubao_cli")
+    executable = pf.which(os.path.expanduser(configured) if configured else "doubao")
+    if executable and not executable.endswith(".mjs"):
+        return [executable, "headless"]
+    local_entry = Path.home() / ".local/share/doubao-recording/node_modules/doubao-cli/bin/doubao.mjs"
+    entry = Path(executable or configured or local_entry).expanduser()
+    node = pf.which("node")
+    return [node, str(entry), "headless"] if node and entry.is_file() and entry.suffix == ".mjs" else []
 
 
 # ---------- 项目 ----------
@@ -481,14 +503,21 @@ def whoami():
     return None
 
 
+CLAUDE_SEALED = "Claude 已永久封印，AgentBus 不会启动它。"
+
+
 def sealed(agent, cfg=None):
-    """Claude 封印（默认开）：Claude 和它的分身不当队员——不接派活、不进聊天室、不查额度，任何能把它当队员唤醒的路都关着。
-    当主位不受影响。主人在队员页确认风险后可以解封（settings.claude_seal = False）。agent 可以是 id 或 agent 字典。"""
-    cfg = cfg if cfg is not None else load_json(CONFIG, DEFAULT_CONFIG)
-    a = agent if isinstance(agent, dict) else agents_dict(cfg).get(agent) or {}
-    if a.get("run") != "claude":
-        return False
-    return (cfg.get("settings") or {}).get("claude_seal", True) is not False
+    """Claude 及其分身固定封印，旧配置无法解除。"""
+    if isinstance(agent, str):
+        if agent.casefold() == "claude":
+            return True
+        agent = agents_dict(cfg).get(agent) or {}
+    cmd = agent.get("cmd")
+    exe = cmd[0] if isinstance(cmd, list) and cmd else agent.get("bin")
+    executable = str(exe or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    return executable in {"claude", "claude.exe", "claude.cmd", "claude.bat", "claude.app"} or any(
+        str(agent.get(key) or "").casefold() == "claude" for key in ("id", "run", "clone_of")
+    )
 
 
 def is_working_as_member(agent):
