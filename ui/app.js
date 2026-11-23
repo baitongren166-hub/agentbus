@@ -145,6 +145,21 @@
       <div class="tag ${a.id === viewLead() ? "lead" : ""}"><b>${a.id === viewLead() ? `<span class="crown">👑</span>` : `<i class="dot" style="background:${STATE[a.state].c}"></i>`}${esc(a.name)}${a.id === viewLead() ? `<em>主位</em>` : ""}</b>${a.quota_text ? `<small>${esc(a.quota_text)}</small>` : ""}</div></div>`;
   }
   const openBtns = (a, cls = "") => `${a.open && a.open.app ? `<button class="btn ${cls} primary" data-open="${esc(a.id)}" data-how="app">${icon("open")}打开桌面端</button>` : ""}${a.open && a.open.cli ? `<button class="btn ${cls}" data-open="${esc(a.id)}" data-how="cli">${icon("quests")}打开 CLI</button>` : ""}`;
+  // 部署：桌面版 / 命令行版各一行，装没装、打开、安装（或从桌面版接上）、卸载。招募弹窗和队员页共用
+  const canRecruit = a => !a.sealed && !!(a.install || a.get_url || (a.deploy && ((a.deploy.app && (a.deploy.app.have || a.deploy.app.url)) || (a.deploy.cli && a.deploy.cli.how))));
+  function deployPanel(a) {
+    const d = a.deploy; if (!d || (!d.app && !d.cli)) return "";
+    const row = (part, t, x, btns) => `<div class="dp-r"><div class="dp-t"><b>${t}</b><span>${esc(x.name || "")}</span></div><span class="pill ${x.have ? "ok" : ""}">${x.have ? "已装" : "没装"}</span><div class="dp-b">${btns}</div></div>`;
+    const app = d.app && row("app", "桌面版", d.app, d.app.have
+      ? `<button class="btn sm" data-open="${esc(a.id)}" data-how="app">${icon("open")}打开</button>${d.app.can_remove ? `<button class="btn sm ghost" data-dp-rm="${esc(a.id)}" data-part="app">卸载</button>` : ""}`
+      : d.app.url ? `<button class="btn sm primary" data-geturl="${esc(d.app.url)}">${icon("plus")}去官网下载</button>` : `<span class="small muted">官网自行下载</span>`);
+    const c = d.cli, link = c && c.how === "link";
+    const cli = c && row("cli", "命令行版", c, c.have
+      ? `<button class="btn sm" data-open="${esc(a.id)}" data-how="cli">${icon("quests")}打开</button>${c.can_remove ? `<button class="btn sm ghost" data-dp-rm="${esc(a.id)}" data-part="cli">${link ? "断开" : "卸载"}</button>` : ""}`
+      : c.how ? (c.needs ? `<span class="small warn">要先装${esc(c.needs.name)}</span>` : `<button class="btn sm primary" data-dp-cli="${esc(a.id)}">${icon("plus")}${link ? "从桌面版接上" : "一键安装"}</button>`)
+      : `<span class="small muted">没有一键安装</span>`);
+    return `<div class="dp"><div class="dp-h">部署</div>${app || ""}${cli || ""}${c && !c.have ? `<p class="small muted dp-n">派活、聊天室要用命令行版；装好或接上后会自动来休息室报到</p>` : ""}</div>`;
+  }
   function leadHTML() {
     const bo = baseOffice(), lid = bo ? bo.agent : S.lead; // 基地显示的那间办公室的主位
     const a = lid && S.agents.find(x => x.id === lid);
@@ -378,19 +393,21 @@
   }
   // 全身立绘（美术素材里那套 01_DeepSeek…）：卡片用小图，战备页用大图
   const lihui = (a, big) => a.lihui ? `<img class="lh" src="${esc(big ? a.lihui : a.lihui.replace("/lihui/", "/lihui/sm/"))}" alt="" draggable="false" loading="lazy">` : "";
+  // 卡片上直接打开桌面版 / 命令行（小图标按钮）
+  const openIcons = (a, cls) => a.sealed || !a.open ? "" : `${a.open.app ? `<button class="${cls}" data-open="${esc(a.id)}" data-how="app" title="打开桌面版">${icon("open")}</button>` : ""}${a.open.cli ? `<button class="${cls}" data-open="${esc(a.id)}" data-how="cli" title="打开命令行">${icon("quests")}</button>` : ""}`;
   function memberCard(a) {
-    const act = !a.installed ? (a.install ? `<button class="btn sm primary" data-recruit="${esc(a.id)}">${icon("plus")}招募</button>` : a.get_url ? `<button class="btn sm primary" data-geturl="${esc(a.get_url)}">${icon("plus")}去官网下载</button>` : "")
+    const act = !a.installed ? (canRecruit(a) ? `<button class="btn sm primary" data-recruit="${esc(a.id)}">${icon("plus")}招募</button>` : a.get_url ? `<button class="btn sm primary" data-geturl="${esc(a.get_url)}">${icon("plus")}去官网下载</button>` : "")
       : a.place === "office" ? `<button class="btn sm" data-move="lounge" data-id="${esc(a.id)}">去休息</button>` : `<button class="btn sm primary" data-move="office" data-id="${esc(a.id)}">上阵</button>`;
     return `<a class="mc ${a.installed ? "" : "absent"} ${a.lihui ? "has-lh" : ""}" style="--c:${esc(a.color)}" href="#hero/${encodeURIComponent(a.id)}">
       ${a.lihui ? `<div class="mc-lh">${lihui(a)}</div>` : ""}<div class="mc-art">${figureHTML(a, "desk")}</div>
       <div class="mc-info"><div class="mc-top"><h3>${esc(a.name)}</h3>${a.sealed ? `<span class="pill seal" title="不接派活、不进聊天室、不查额度">🔒 封印</span>` : ""}${statePill(a)}</div><p>${esc(a.vendor || "")}${a.installed ? brainPill(a) : ""}</p>
         <div class="trs">${traits(a)}</div>
         <div class="mc-tags">${a.installed ? skillPills(a) || `<span class="small muted">还没装配职能</span>` : `<span class="small muted">${esc(a.desc || "")}</span>`}</div>
-        <div class="mc-foot">${quotaPill(a) || `<span></span>`}<span class="mc-btns">${cloneAct(a)}${act}</span></div></div></a>`;
+        <div class="mc-foot">${quotaPill(a) || `<span></span>`}<span class="mc-btns">${openIcons(a, "btn sm ghost")}${cloneAct(a)}${act}</span></div></div></a>`;
   }
   // 卡片视图：一张张角色卡，头像 + 名字 + 标注，操作放角上
   function charCard(a) {
-    const act = !a.installed ? (a.install ? `<button class="cc-b primary" data-recruit="${esc(a.id)}" title="招募">${icon("plus")}</button>` : a.get_url ? `<button class="cc-b primary" data-geturl="${esc(a.get_url)}" title="去官网下载">${icon("plus")}</button>` : "")
+    const act = !a.installed ? (canRecruit(a) ? `<button class="cc-b primary" data-recruit="${esc(a.id)}" title="招募">${icon("plus")}</button>` : a.get_url ? `<button class="cc-b primary" data-geturl="${esc(a.get_url)}" title="去官网下载">${icon("plus")}</button>` : "")
       : a.place === "office" ? `<button class="cc-b" data-move="lounge" data-id="${esc(a.id)}" title="去休息">${icon("sofa")}</button>` : `<button class="cc-b primary" data-move="office" data-id="${esc(a.id)}" title="上阵">${icon("star")}</button>`;
     const cl = a.clone_of ? `<button class="cc-b danger" data-clone-x="${esc(a.id)}" title="解散分身">${icon("close")}</button>`
       : a.cloneable ? `<button class="cc-b" data-clone-new="${esc(a.id)}" title="开分身">${icon("copy")}</button>` : "";
@@ -399,7 +416,7 @@
       <b class="cc-name">${esc(a.name)}</b>
       <span class="cc-brain">${a.installed && a.brain ? esc(a.brain.label) : esc(a.vendor || "")}</span>
       <div class="trs">${traits(a, 1)}</div>
-      <div class="cc-act">${cl}${act}</div></a>`;
+      <div class="cc-act">${openIcons(a, "cc-b")}${cl}${act}</div></a>`;
   }
   function pTeam() {
     ui.teamView ??= (() => { try { return localStorage.getItem("teamView") || "list"; } catch { return "list"; } })();
@@ -464,7 +481,7 @@
         <div class="qc-stats"><div><span>今天</span><b>${list ? today.length + " 个" : "…"}</b></div><div><span>用时</span><b>${list ? mins(today.reduce((s, q) => s + (q.seconds || 0), 0)) : "…"}</b></div><div><span>${S.batch ? "本批消耗" : "项目消耗"}</span><b>${bill ? used : "…"}</b></div></div>
         ${skillPills(a) ? `<div class="qc-skills">${skillPills(a)}</div>` : ""}
         ${a.installed && a.billing !== "manual" && a.brain ? `<div class="qc-brain">${brainBtn(a)}</div>` : ""}
-        <div class="qc-act">${openBtns(a, "sm")}${a.installed ? (a.place === "office" ? `<button class="btn sm" data-move="lounge" data-id="${esc(a.id)}">${icon("sofa")}去休息</button>` : `<button class="btn sm primary" data-move="office" data-id="${esc(a.id)}">${icon("star")}上阵</button>`) : a.install ? `<button class="btn sm primary" data-recruit="${esc(a.id)}">${icon("plus")}招募</button>` : a.get_url ? `<button class="btn sm primary" data-geturl="${esc(a.get_url)}">${icon("plus")}去官网下载</button>` : ""}
+        <div class="qc-act">${openBtns(a, "sm")}${a.installed ? (a.place === "office" ? `<button class="btn sm" data-move="lounge" data-id="${esc(a.id)}">${icon("sofa")}去休息</button>` : `<button class="btn sm primary" data-move="office" data-id="${esc(a.id)}">${icon("star")}上阵</button>`) : canRecruit(a) ? `<button class="btn sm primary" data-recruit="${esc(a.id)}">${icon("plus")}招募</button>` : a.get_url ? `<button class="btn sm primary" data-geturl="${esc(a.get_url)}">${icon("plus")}去官网下载</button>` : ""}
           ${a.installed && !a.sealed && S.lead !== a.id ? `<button class="btn sm" data-lead="${esc(a.id)}">👑 设为主位</button>` : ""}${a.installed && !a.sealed && a.billing !== "manual" ? `<button class="btn sm ghost" data-msg="${esc(a.id)}">💬</button>` : ""}<a class="btn sm ghost" href="#hero/${encodeURIComponent(a.id)}">完整战备 ${icon("chev")}</a></div>`;
       tick(); place();
     };
@@ -516,11 +533,11 @@
     if (!r && !l) return;
     e.preventDefault(); e.stopPropagation();
     if (r) return recruit(r.dataset.recruit);
-    const list = recruits().filter(a => a.install);
+    const list = recruits().filter(canRecruit);
     $("#layer").innerHTML = `<div class="sheet-bg" id="sheet-bg"><div class="modal"><h2>招募新队员</h2>
       <button class="rc-api" data-apiwiz><span class="rc-api-ic">🔌</span><span><b>接入 API</b><small>官方 API 或中转都行：填 key → 选模型 → 直接上岗，不用安装</small></span>${icon("chev")}</button>
-      <p class="muted small" style="margin-top:14px">或者一键安装命令行工具，装好就会来休息室报到：</p>
-      <div class="rc-list">${list.map(a => `<button class="pa" data-recruit="${esc(a.id)}">${avatar(a, 40)}<span class="nm">${esc(a.name)}<small>${esc(a.vendor || "")}</small></span>${icon("chev")}</button>`).join("") || `<p class="muted">没有可以一键安装的了</p>`}</div>
+      <p class="muted small" style="margin-top:14px">或者装桌面版 / 命令行版，装好就会来休息室报到：</p>
+      <div class="rc-list">${list.map(a => `<button class="pa" data-recruit="${esc(a.id)}">${avatar(a, 40)}<span class="nm">${esc(a.name)}<small>${esc(a.vendor || "")}${a.deploy && a.deploy.app && a.deploy.app.have ? " · 已装桌面版，还差命令行版" : ""}</small></span>${icon("chev")}</button>`).join("") || `<p class="muted">没有可以招募的了</p>`}</div>
       <div class="modal-act"><button class="btn ghost" id="rc-x">关闭</button></div></div></div>`;
     $("#rc-x").onclick = () => ($("#layer").innerHTML = "");
     $("#sheet-bg").onclick = ev => { if (ev.target.id === "sheet-bg") $("#layer").innerHTML = ""; };
@@ -610,35 +627,72 @@
     draw();
   }
   document.addEventListener("click", e => { const b = e.target.closest("[data-apiwiz]"); if (!b) return; e.preventDefault(); e.stopPropagation(); apiWizard(); }, true);
-  function recruit(id) {
+  // 招募弹窗：上面是桌面版 / 命令行版两行（部署面板），点“一键安装 / 从桌面版接上”在下面展开命令和安装日志
+  function recruit(id, cliNow) {
     const a = A(id);
-    $("#layer").innerHTML = `<div class="sheet-bg" id="sheet-bg"><div class="modal"><div style="display:flex;gap:12px;align-items:center">${avatar(a, 56)}<div><h2>招募 ${esc(a.name)}？</h2><p class="muted small" style="margin:2px 0 0">${esc(a.vendor || "")} · ${esc(a.desc || "")}</p></div></div>
-      <label class="fld"><span>安装位置</span><input class="inp" id="rc-dir" placeholder="默认位置（不用改）" value="${esc((S.settings || {}).install_dir || "")}"></label>
-      <p class="small">会在这台电脑上执行下面这条命令（需要联网下载，通常一两分钟）：</p><pre class="cmd" id="rc-cmd">${esc(a.install)}</pre>
-      <p class="small warn" id="rc-need" hidden></p>
-      <pre class="cmd log" id="rc-log" hidden></pre>
-      <div class="modal-act"><button class="btn ghost" id="rc-x">取消</button><button class="btn primary" id="rc-go">${icon("plus")}一键安装</button></div></div></div>`;
+    $("#layer").innerHTML = `<div class="sheet-bg" id="sheet-bg"><div class="modal"><div style="display:flex;gap:12px;align-items:center">${avatar(a, 56)}<div><h2>招募 ${esc(a.name)}</h2><p class="muted small" style="margin:2px 0 0">${esc(a.vendor || "")} · ${esc(a.desc || "")}</p></div></div>
+      <div id="rc-dp">${deployPanel(a) || (a.get_url ? `<p><button class="btn primary" data-geturl="${esc(a.get_url)}">${icon("plus")}去官网下载</button></p>` : "")}</div>
+      <div id="rc-cli" hidden></div>
+      <div class="modal-act"><button class="btn ghost" id="rc-x">关闭</button></div></div></div>`;
     const close = () => { clearInterval(recruit.t); $("#layer").innerHTML = ""; };
     $("#rc-x").onclick = close;
     $("#sheet-bg").onclick = ev => { if (ev.target.id === "sheet-bg") close(); };
+    if (cliNow || (!(a.deploy && a.deploy.cli) && a.install)) cliInstall(a);
+  }
+  function cliInstall(a) {
+    const id = a.id, box = $("#rc-cli"); if (!box) return recruit(id, true);
+    const link = a.deploy && a.deploy.cli && a.deploy.cli.how === "link", dir = a.deploy && a.deploy.cli && ["npm", "uv"].includes(a.deploy.cli.how);
+    box.hidden = false;
+    document.querySelectorAll("#rc-dp [data-dp-cli]").forEach(b => (b.hidden = true)); // 下面已经展开了，上面那颗按钮收起来
+    box.innerHTML = `${dir ? `<label class="fld"><span>安装位置</span><input class="inp" id="rc-dir" placeholder="默认位置（不用改）" value="${esc((S.settings || {}).install_dir || "")}"></label>` : ""}
+      <p class="small">${link ? "会做这件事（不联网、不改桌面版）：" : "会在这台电脑上执行下面这条命令（需要联网下载，通常一两分钟）："}</p><pre class="cmd" id="rc-cmd">${esc(a.install || "")}</pre>
+      <p class="small warn" id="rc-need" hidden></p>
+      <pre class="cmd log" id="rc-log" hidden></pre>
+      <div class="modal-act"><button class="btn primary" id="rc-go">${icon("plus")}${link ? "接上命令行" : "一键安装"}</button></div>`;
+    const dirv = () => ($("#rc-dir") ? $("#rc-dir").value.trim() : "");
     const preview = async () => {
-      const r = await api(`/api/install/preview?agent=${encodeURIComponent(id)}&dir=${encodeURIComponent($("#rc-dir").value.trim())}`); if (!r) return;
+      const r = await api(`/api/install/preview?agent=${encodeURIComponent(id)}&dir=${encodeURIComponent(dirv())}`); if (!r) return;
       $("#rc-cmd").textContent = r.cmd || "这台电脑上没有一键安装"; const n = $("#rc-need");
-      n.hidden = !r.needs; if (r.needs) n.innerHTML = `要先装 ${esc(r.needs.name)}：<a class="lnk" href="${esc(r.needs.url)}" target="_blank">${esc(r.needs.url)}</a>`;
+      n.hidden = !r.needs; if (r.needs) n.innerHTML = `要先装 ${esc(r.needs.name)}${r.needs.url ? `：<a class="lnk" href="${esc(r.needs.url)}" target="_blank">${esc(r.needs.url)}</a>` : ""}`;
       $("#rc-go").disabled = !r.cmd || !!r.needs;
     };
-    $("#rc-dir").onchange = preview; preview();
+    if ($("#rc-dir")) $("#rc-dir").onchange = preview;
+    preview();
     $("#rc-go").onclick = async () => {
-      if (!(await api("/api/install", { agent: id, install_dir: $("#rc-dir").value.trim() }))) return;
-      const go = $("#rc-go"); go.disabled = true; go.textContent = "安装中…"; $("#rc-x").textContent = "后台继续，关闭";
-      const log = $("#rc-log"); log.hidden = false;
-      recruit.t = setInterval(async () => {
-        const st = await api("/api/install?agent=" + encodeURIComponent(id)); if (!st || !$("#rc-log")) return clearInterval(recruit.t);
-        log.textContent = st.log || "开始安装…"; log.scrollTop = log.scrollHeight;
-        if (st.done) { clearInterval(recruit.t); go.textContent = st.ok ? "装好了！" : "没装上，看上面的日志"; toast(st.ok ? `${a.name} 来休息室报到了` : `${a.name} 没装上`, st.ok ? "star" : "close"); }
-      }, 2000);
+      if (!(await api("/api/install", { agent: id, ...(dir ? { install_dir: dirv() } : {}) }))) return;
+      const go = $("#rc-go"); go.disabled = true; go.textContent = link ? "接线中…" : "安装中…"; $("#rc-x").textContent = "后台继续，关闭";
+      watchInstall(a, go, st => st.ok ? `${a.name} 来休息室报到了` : `${a.name} 没装上`);
     };
   }
+  function watchInstall(a, go, msg) {
+    const log = $("#rc-log"); log.hidden = false;
+    clearInterval(recruit.t);
+    recruit.t = setInterval(async () => {
+      const st = await api("/api/install?agent=" + encodeURIComponent(a.id)); if (!st || !$("#rc-log")) return clearInterval(recruit.t);
+      log.textContent = st.log || "开始…"; log.scrollTop = log.scrollHeight;
+      if (st.done) { clearInterval(recruit.t); go.textContent = st.ok ? "好了！" : "没成功，看上面的日志"; toast(msg(st), st.ok ? "star" : "close"); }
+    }, 1500);
+  }
+  document.addEventListener("click", e => {
+    const c = e.target.closest("[data-dp-cli]"), rm = e.target.closest("[data-dp-rm]");
+    if (!c && !rm) return;
+    e.preventDefault(); e.stopPropagation();
+    if (c) return $("#rc-cli") ? cliInstall(A(c.dataset.dpCli)) : recruit(c.dataset.dpCli, true);
+    const a = A(rm.dataset.dpRm), part = rm.dataset.part, d = (a.deploy || {})[part] || {}, link = part === "cli" && d.how === "link";
+    const what = part === "app" ? `${a.name} 桌面版（${esc(d.name || "")}）会移到废纸篓，可以从废纸篓放回来` : link ? `删掉接上的 ${esc(d.name || "")} 启动脚本，桌面版不动，以后可以再接上` : `卸载 ${a.name} 的命令行版（${esc(d.name || "")}）`;
+    $("#layer").innerHTML = `<div class="sheet-bg" id="sheet-bg"><div class="modal"><h2>${part === "app" ? "卸载桌面版" : link ? "断开命令行" : "卸载命令行版"}？</h2><p>${what}。${part === "cli" ? "没了命令行就不能派活、进不了聊天室。" : ""}</p>
+      <pre class="cmd log" id="rc-log" hidden></pre>
+      <div class="modal-act"><button class="btn ghost" id="rc-x">取消</button><button class="btn primary" id="rc-go">确定</button></div></div></div>`;
+    const close = () => { clearInterval(recruit.t); $("#layer").innerHTML = ""; };
+    $("#rc-x").onclick = close;
+    $("#sheet-bg").onclick = ev => { if (ev.target.id === "sheet-bg") close(); };
+    $("#rc-go").onclick = async () => {
+      const r = await api("/api/uninstall", { agent: a.id, part }); if (!r) return;
+      if (r.manual) { close(); return toast("已打开系统的“应用”设置，在里面卸载", "open"); }
+      const go = $("#rc-go"); go.disabled = true; go.textContent = "处理中…"; $("#rc-x").textContent = "关闭";
+      watchInstall(a, go, st => st.ok ? `${a.name} 的${part === "app" ? "桌面版" : "命令行版"}${link ? "断开了" : "卸掉了"}` : "没成功");
+    };
+  }, true);
 
   // ---------- 战备（角色 → 职能 → 词条）----------
   // 账号登录（通用）：新手不用开终端。内置授权 / 后台跑它自带的登录命令 / 打开它的应用 / 兜底开终端
@@ -713,7 +767,7 @@
     const cats = CAT ? CAT.categories : [];
     const shown = cats.filter(c => jobs["cat:" + c.id] || c.tags.some(t => jobs["tag:" + t]) || ui.openCat === c.id);
     const others = cats.filter(c => !shown.includes(c));
-    const act = !a.installed ? (a.install ? `<button class="btn primary" data-recruit="${esc(a.id)}">${icon("plus")}一键招募</button>` : `<span class="small muted">${esc(a.desc)}</span>`)
+    const act = !a.installed ? (canRecruit(a) ? `<button class="btn primary" data-recruit="${esc(a.id)}">${icon("plus")}招募</button>` : `<span class="small muted">${esc(a.desc)}</span>`)
       : a.billing === "manual" && a.install ? `<button class="btn" data-recruit="${esc(a.id)}">${icon("plus")}装命令行版</button>${a.place === "office" ? "" : `<button class="btn primary" data-move="office" data-id="${esc(a.id)}">${icon("star")}上阵</button>`}` : a.place === "office"
       ? `<button class="btn" data-move="lounge" data-id="${esc(a.id)}">${icon("sofa")}去休息室</button>` : `<button class="btn primary" data-move="office" data-id="${esc(a.id)}">${icon("star")}上阵</button>`;
     part("hero", $("#hero"), `
@@ -722,7 +776,7 @@
           ${a.sealed ? sealPanel() : ""}${loginPanel(a)}${balancePanel(a)}${meterPickPanel(a)}
           <div class="row-pills">${statePill(a)}<span class="pill">${a.place === "office" ? "上阵中" : "休息室"}</span>${a.clone_of ? `<span class="pill accent">👥 分身</span>` : ""}${quotaPill(a)}</div>
           <div class="hero-act">${act}${a.installed && !a.sealed ? (S.lead === a.id ? `<span class="pill accent">👑 主位</span>` : `<button class="btn" data-lead="${esc(a.id)}">👑 设为主位</button>`) : ""}<a class="btn ghost" href="#quests" data-qa-go="${esc(a.id)}">${icon("quests")}任务记录</a>${a.installed && !a.sealed && a.billing !== "manual" ? `<button class="btn ghost" data-msg="${esc(a.id)}">💬 留言</button>` : ""}</div>
-          ${a.installed && (a.open.app || a.open.cli) ? `<div class="hero-act">${openBtns(a, "sm")}</div>` : ""}
+          ${deployPanel(a) || (a.installed && (a.open.app || a.open.cli) ? `<div class="hero-act">${openBtns(a, "sm")}</div>` : "")}
           ${a.installed && a.billing !== "manual" ? `<div class="hero-act">${brainBtn(a)}${cloneBar(a)}${a.api ? `<button class="clone-chip x" data-api-x="${esc(a.id)}">解雇</button>` : ""}</div>` : ""}</div></div>
       <div class="hero-side">
         <div class="stats"><div class="stat"><div class="k">完成任务</div><div class="v">${done.length}</div></div>
@@ -1148,6 +1202,7 @@
   // 设计借鉴 agentchattr（MIT）；叫醒 agent 走 agentbus 自己的派活，不需要主位。基地右侧的小聊天框用的是同一套。
   ui.chat = { channel: (() => { try { return localStorage.getItem("chatChannel") || "大厅"; } catch { return "大厅"; } })(), data: null, files: [] };
   const mentionable = () => S.agents.filter(a => a.installed && a.billing !== "manual" && !a.sealed); // 封印的 Claude 不进聊天室
+  const chatMissing = () => S.agents.filter(a => !a.installed && !a.sealed && a.billing !== "manual" && canRecruit(a)); // 装了桌面版、没命令行的也在这里
   const chatName = id => id === "user" ? "我" : id === "agentbus" ? "agentbus" : A(id).name;
   const chatText = t => esc(t).replace(/@(所有人|[\w一-龥·.-]+)/g, '<b class="at">@$1</b>').replace(/\n/g, "<br>");
   const fileHTML = f => f.image && f.path.includes("/.agentbus/chat/files/")
@@ -1189,7 +1244,7 @@
         <span class="ch-ctx" title="给队员的上下文：压缩要点 + 最近消息（${u.budget} 字以内）；没压缩的部分到 ${u.compress_at} 字会自动压缩">上下文<i><b style="width:${pct}%"></b></i>${Math.round((u.chars || 0) / 100) / 10}k${u.compressions ? ` · 压过 ${u.compressions} 次` : ""}</span>
         <button class="btn sm ghost" data-chcompress title="把旧消息压成要点">压缩</button>
         ${d.running || d.talking ? `<button class="btn sm danger" data-chstop>⏹ 停止</button>` : ""}
-        <button class="ib" data-chset title="频道设置">${icon("settings")}</button></div>
+        <button class="ib" data-recruit-list title="添加队员（装命令行版 / 从桌面版接上）">${icon("plus")}</button><button class="ib" data-chset title="频道设置">${icon("settings")}</button></div>
       <div class="chb-rule">${rule}</div>`);
     const ta = $("#ch-text"); if (ta) ta.placeholder = talk ? "说一句话，大家轮流接着聊…（@ 某人 = 单独给他派活）" : "@ 队员派活，比如：@GPT 帮我找三张参考图…（不 @ 就交给值班的）";
     const box = $("#ch-msgs"), near = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
@@ -1246,6 +1301,8 @@
             <div class="cs-mem">${pool.map(a => `<button class="chip ${st.members.includes(a.id) ? "on" : ""}" data-csmem="${esc(a.id)}">${avatar(a, 20)}${esc(a.name)}</button>`).join("")}</div></div>
           <div class="cs-row"><div><b>聊几轮</b><span>每轮每人最多说一次；没人有新东西说时会提前结束</span></div>
             <div class="seg sm">${[1, 2, 3].map(n => `<button class="${st.rounds === n ? "on" : ""}" data-csround="${n}">${n} 轮</button>`).join("")}</div></div>`}
+        ${chatMissing().length ? `<div class="cs-row col"><div><b>添加队员</b><span>这些队员还没有可用的命令行版，进不了聊天室；装好或从桌面版接上就能 @ 他</span></div>
+            <div class="cs-mem">${chatMissing().map(a => `<button class="chip" data-recruit="${esc(a.id)}">${avatar(a, 20)}${esc(a.name)}<small>${a.deploy && a.deploy.cli && a.deploy.cli.how === "link" ? "接上命令行" : a.deploy && a.deploy.app && a.deploy.app.have ? "装命令行版" : "招募"}</small></button>`).join("")}</div></div>` : ""}
         <p class="small muted">字数、上下文、并发这些上限在 设置 → 聊天室 里调。</p>`;
     };
     $("#layer").innerHTML = `<div class="sheet-bg" id="sheet-bg"><div class="modal csm"><h2>频道设置 · # ${esc(d.channel)}</h2><div id="cs-body"></div>

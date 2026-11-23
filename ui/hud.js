@@ -706,6 +706,10 @@
     if (hideMin > 0 && idle >= hideMin && !idleHidden) { idleHidden = true; invoke("hud_visible", { on: false }); }
     else if (ballMin > 0 && idle >= ballMin && !ball) { ball = true; document.body.classList.add("ball"); lastWin = null; render(); }
   }, 15000);
+  // 报平安：应用 45 秒收不到就重新加载悬浮窗（第一次加载时服务没起来、网页进程崩了都会变成一块看不见的透明窗）
+  // 老版本应用没有这条命令，失败不上报
+  const beat = () => { if (S && T && T.core) T.core.invoke("hud_beat").catch(() => {}); };
+  setInterval(beat, 10000);
   // 有好几个在干活时，胶囊每 4 秒换一个
   setInterval(() => { if (S && !open && (S.running.length > 1 || S.agents.filter(a => a.state === "working").length > 1)) { pill.dataset.html = ""; render(); } }, 4000);
 
@@ -730,6 +734,7 @@
     s = withHello(s);
     const prev = S;
     S = s;
+    if (!prev) beat();
     if (s.chat_rev !== chatRev) { chatRev = s.chat_rev; if (open && tab === "chat") loadChat(); }
     const h = s.settings.hud;
     if (!prev || h.dock !== edge || (edge === "float" && (h.float_x !== (prev && prev.settings.hud.float_x) || h.float_y !== (prev && prev.settings.hud.float_y)))) { applyDock(h); lastWin = null; }

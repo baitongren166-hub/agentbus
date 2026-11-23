@@ -22,7 +22,7 @@ import activity  # noqa: E402
 import brains  # noqa: E402
 import pf  # noqa: E402
 import quota  # noqa: E402
-from catalog import CATEGORIES, INSTALL, INSTALL_GUIDE, LEVELS, OPENERS, install_cmd, install_needs  # noqa: E402
+from catalog import CATEGORIES, DESKTOP_URL, INSTALL, INSTALL_GUIDE, INSTALL_SPEC, LEVELS, OPENERS, install_cmd, install_how, install_needs  # noqa: E402
 from config import (GENERAL, HOME, LEDGER, agents_dict, bill, pack_library, pack_mounts, skill_library, create_project, current_project, installed,  # noqa: E402
                     ledger_add, load_config, load_json, project, projects, resolve_tag, save_config, save_json, set_batch, set_current)
 
@@ -853,7 +853,8 @@ def state(project_name=None):
                                  ("assets/avatars/robot.png" if (UI / "assets/avatars/robot.png").exists() else None),
                        "since": by_agent.get(aid, {}).get("start"), "desk": desk_art(a), "direct": st == "working" and aid not in by_agent,
                        "frames": anim_info(art), "lihui": lihui_of(art),
-                       "install": install_cmd(look, (cfg.get("settings") or {}).get("install_dir")) if not _sealed_of(a, cfg) and (not inst or a.get("billing") == "manual") else None, "get_url": INSTALL_GUIDE.get(look) if not inst and not _sealed_of(a, cfg) else None, "open": openers(look), "char": _art(f"char-{art}.png"), "lounge_art": _art(f"lounge-{art}.png"), "quota_text": quota_text(a), "meter": meter(a), "sealed": _sealed_of(a, cfg), "balance": _balance_ui(a, cfg), "login": _login_ui(a) if inst else None,
+                       "install": install_cmd(look, (cfg.get("settings") or {}).get("install_dir")) if not _sealed_of(a, cfg) and (not inst or a.get("billing") == "manual") else None, "get_url": (INSTALL_GUIDE.get(look) or DESKTOP_URL.get(look)) if not inst and not _sealed_of(a, cfg) else None, "open": openers(look),
+                       "deploy": deploy_info(look, a, cfg) if not a.get("api") and not _sealed_of(a, cfg) else None, "char": _art(f"char-{art}.png"), "lounge_art": _art(f"lounge-{art}.png"), "quota_text": quota_text(a), "meter": meter(a), "sealed": _sealed_of(a, cfg), "balance": _balance_ui(a, cfg), "login": _login_ui(a) if inst else None,
                        "clone_of": a.get("clone_of"), "brain": brain_brief(cfg, aid, a), "caps": a.get("caps") or [], "api": bool(a.get("api")), "generic": art == "api", "provider_name": prov_name, "brand": brand,
                        "cloneable": inst and not a.get("clone_of") and a.get("billing") != "manual" and a.get("run") not in (None, "doubao")})
     order = {aid: i for i, aid in enumerate(cfg["roster"]["office"] + cfg["roster"]["lounge"])}
@@ -1160,14 +1161,16 @@ def start_install(aid, install_dir=None):
         cfg.setdefault("settings", {})["install_dir"] = install_dir.strip() or None
         save_config(cfg)
     from catalog import install_argv
+    need = install_needs(aid)
+    if need:
+        raise ValueError(f"要先装 {need['name']}" + (f"（{need['url']}）" if need.get("url") else "") + "，装好再来招募")
+    if aid in _installs and _installs[aid].poll() is None:
+        return
+    if install_how(aid) == "link":
+        return _bg(aid, lambda log: link_cli(aid, log))
     plan = install_argv(aid, (load_config().get("settings") or {}).get("install_dir"))
     if not plan:
         raise ValueError("这个 agent 在这台电脑上没有一键安装")
-    need = install_needs(aid)
-    if need:
-        raise ValueError(f"要先装 {need['name']}（{need['url']}），装好再来招募")
-    if aid in _installs and _installs[aid].poll() is None:
-        return
     d = HOME / "install"
     d.mkdir(parents=True, exist_ok=True)
     log = open(d / f"{aid}.log", "w")
@@ -1175,6 +1178,160 @@ def start_install(aid, install_dir=None):
     if argv is None:  # catalog 里写死的官方安装脚本，不含任何主人输入
         argv, extra = pf.shell(extra), {}
     _installs[aid] = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env={**os.environ, **extra}, **pf.group_kwargs())
+
+
+class _Task:
+    """在线程里跑的安装 / 卸载，跟 Popen 一样用 poll() 看结果。"""
+    def __init__(self):
+        self.code = None
+
+    def poll(self):
+        return self.code
+
+
+def _bg(aid, fn):
+    d = HOME / "install"
+    d.mkdir(parents=True, exist_ok=True)
+    t = _installs[aid] = _Task()
+
+    def run():
+        with open(d / f"{aid}.log", "w") as log:
+            try:
+                ok = fn(log)
+            except Exception as e:  # noqa: BLE001
+                print(f"出错了：{e}", file=log)
+                ok = False
+        t.code = 0 if ok else 1
+        _cache.clear()
+    threading.Thread(target=run, daemon=True).start()
+
+
+SHIM_MARK = "agentbus 生成"
+
+
+def _shim(aid):
+    return Path.home() / ".local" / "bin" / INSTALL_SPEC[aid]["link"]
+
+
+def _our_shim(f):
+    """这个启动脚本是不是 agentbus（或之前手工照同样办法）建的：是才敢覆盖、删除。"""
+    try:
+        t = f.read_text("utf-8", "ignore")[:600]
+    except OSError:
+        return False
+    return SHIM_MARK in t or "cli-launch/zcode.cjs" in t
+
+
+def link_cli(aid, log):
+    """从桌面版接上命令行：写一个启动脚本，用桌面版自带的 Electron 当 node 跑它藏着的命令行。不下载、不动桌面版本身。"""
+    import subprocess
+    spec = INSTALL_SPEC[aid]
+    app = Path(f"/Applications/{spec['app']}.app")
+    exe = app / "Contents" / "MacOS" / spec["app"]
+    if not exe.exists():
+        exe = next((x for x in (app / "Contents" / "MacOS").glob("*") if os.access(x, os.X_OK)), None) if (app / "Contents" / "MacOS").exists() else None
+    if not exe or not (app / spec["script"]).exists():
+        print(f"没找到 {app}，或者这个版本的桌面版里没有命令行。先装好 {spec['app']} 桌面版再来。", file=log)
+        return False
+    # 命令行按“主脚本旁边的 provider”找模型配置，所以单独放一个启动目录，旁边链上桌面版的 provider
+    launch = HOME / "cli-launch" / aid
+    launch.mkdir(parents=True, exist_ok=True)
+    (launch / "zcode.cjs").write_text(f"require({json.dumps(str(app / spec['script']))});\n", "utf-8")
+    prov = launch / "provider"
+    if prov.is_symlink() or prov.exists():
+        prov.unlink()
+    if (app / spec["provider"]).exists():
+        prov.symlink_to(app / spec["provider"])
+    shim = _shim(aid)
+    if shim.exists() and not _our_shim(shim):
+        print(f"{shim} 已经有一个别人装的 {spec['link']}，没动它。", file=log)
+        return False
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    shim.write_text(f"#!/bin/sh\n# {SHIM_MARK}（招募 → 接上命令行）：用 {spec['app']} 桌面版自带的 Electron 当 node 跑它的命令行\n"
+                    f"ELECTRON_RUN_AS_NODE=1 exec {json.dumps(str(exe))} {json.dumps(str(launch / 'zcode.cjs'))} \"$@\"\n", "utf-8")
+    shim.chmod(0o755)
+    print(f"写好了 {shim}", file=log)
+    try:
+        r = subprocess.run([str(shim), "--version"], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        out = (r.stdout + r.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"试跑 {spec['link']} --version 失败：{e}", file=log)
+        return False
+    print(f"试跑 {spec['link']} --version：{out[-300:] or '（没有输出）'}", file=log)
+    return r.returncode == 0
+
+
+def start_uninstall(aid, part):
+    """卸载：cli = 卸命令行版（npm / uv 原路卸，接上的删启动脚本）；app = 桌面版移到废纸篓（Mac）/ 打开系统的“应用”设置（Windows）。"""
+    import subprocess
+    from catalog import uninstall_argv
+    from config import CLAUDE_SEALED, sealed
+    if sealed(aid):
+        raise ValueError(CLAUDE_SEALED)
+    if aid in _installs and _installs[aid].poll() is None:
+        raise ValueError("它正在装 / 卸，等一会儿")
+    if part == "app":
+        o = OPENERS.get(aid) or {}
+        if not o.get("app") or not pf.app_exists(o):
+            raise ValueError("本机没有它的桌面版")
+        if pf.IS_WIN:
+            os.startfile("ms-settings:appsfeatures")  # noqa: S606  Windows 的桌面版要走系统卸载
+            return {"manual": True}
+        if not pf.IS_MAC:
+            raise ValueError("这个系统上请用软件包管理器卸载")
+        path = f"/Applications/{o['app']}.app"
+
+        def trash(log):
+            r = subprocess.run(["osascript", "-e", f'tell application "Finder" to delete (POSIX file {json.dumps(path)} as alias)'],
+                               capture_output=True, text=True, timeout=60)
+            print((r.stdout + r.stderr).strip() or f"{path} 已移到废纸篓（可以从废纸篓放回来）", file=log)
+            return r.returncode == 0
+        _bg(aid, trash)
+        return {}
+    how = install_how(aid)
+    if how == "link":
+        def unlink(log):
+            f = _shim(aid)
+            if not f.exists():
+                print("本来就没有接上的命令行", file=log)
+                return True
+            if not _our_shim(f):
+                print(f"{f} 不是 agentbus 建的，没动它", file=log)
+                return False
+            f.unlink()
+            print(f"删掉了 {f}（桌面版没动）", file=log)
+            return True
+        _bg(aid, unlink)
+        return {}
+    plan = uninstall_argv(aid, (load_config().get("settings") or {}).get("install_dir"))
+    if not plan:
+        raise ValueError("它的命令行是官方脚本装的，没有一键卸载")
+    d = HOME / "install"
+    d.mkdir(parents=True, exist_ok=True)
+    argv, extra = plan
+    _installs[aid] = subprocess.Popen(argv, stdout=open(d / f"{aid}.log", "w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env={**os.environ, **extra}, **pf.group_kwargs())
+    return {}
+
+
+def deploy_info(aid, a, cfg):
+    """招募 / 队员卡片用：桌面版和命令行版各自装没装、怎么装、能不能卸。"""
+    if a.get("run") in ("api", "doubao") or a.get("billing") == "manual" and not OPENERS.get(aid):
+        return None
+    o = OPENERS.get(aid) or {}
+    how = install_how(aid)
+    cli = o.get("cli") or ((a.get("cmd") or [None])[0] if a.get("run") == "generic" else a.get("bin"))
+    cli_have = bool(cli and pf.which(cli))
+    app_have = bool(o.get("app") and pf.app_exists(o))
+    if how == "link":
+        f = _shim(aid)
+        cli_rm = cli_have and f.exists() and _our_shim(f)
+    else:  # 只认真是从 npm / uv 装的（顺着链接找到包目录）；桌面版自带的、Homebrew 装的不在这里卸
+        spec = INSTALL_SPEC.get(aid) or {}
+        real = os.path.realpath(pf.which(cli)) if cli_have else ""
+        cli_rm = bool(real) and (how == "npm" and f"node_modules/{spec.get('npm')}/" in real.replace("\\", "/")
+                                  or how == "uv" and f"uv/tools/{spec.get('uv')}/" in real.replace("\\", "/"))
+    return {"app": {"name": o.get("app"), "have": app_have, "url": DESKTOP_URL.get(aid) or INSTALL_GUIDE.get(aid), "can_remove": app_have and (pf.IS_MAC or pf.IS_WIN)} if o.get("app") else None,
+            "cli": {"name": cli, "have": cli_have, "how": how if how and install_cmd(aid) else None, "can_remove": bool(cli_rm), "needs": install_needs(aid) if not cli_have and how else None} if cli else None}
 
 
 def install_status(aid):
@@ -1930,7 +2087,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(a2a_rpc(data))
         if u.path == "/api/open-url":  # 打开更新下载页（只放 GitHub 的链接）
             url = str(data.get("url") or "")
-            if not url.startswith("https://github.com/") and url not in INSTALL_GUIDE.values():
+            if not url.startswith("https://github.com/") and url not in INSTALL_GUIDE.values() and url not in DESKTOP_URL.values():
                 return self._json({"error": "只能打开 GitHub 和官方下载页的链接"}, 400)
             pf.open_url(url)
             return self._json({"ok": True})
@@ -2079,6 +2236,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"error": str(e)}, 400)
             _cache.clear()
             return self._json({"ok": True})
+        if u.path == "/api/uninstall":
+            try:
+                r = start_uninstall(data.get("agent", ""), data.get("part", "cli"))
+            except (ValueError, OSError) as e:
+                return self._json({"error": str(e)}, 400)
+            _cache.clear()
+            return self._json({"ok": True, **(r or {})})
         if u.path.startswith("/api/project/"):
             try:
                 if u.path == "/api/project/new":
