@@ -2,7 +2,7 @@
 
   私聊机器人 = agentbus 主界面（新聊天、选项目、新建项目、进度、额度、账单）；
   一个项目群 = 一个项目文件夹；群里一个「新聊天」= 一个对话窗口，两大模式随时切换：
-    主位助理（默认）：这个聊天就是一个接入了 bus 的主位窗口（可选谁当主位），按 bus 自己的规矩派活；
+    助理（默认）：这个聊天就是一个接入了 bus 的主位窗口（可选谁当主位），按 bus 自己的规矩派活；
                       它派的活做完，用 bus 的回音把它叫醒，核对后再告诉主人。
     聊天室：派活（@ 谁谁干，值班只记录）、群聊（头脑风暴），就是 bus 的消息窗口那套。
 用飞书的长连接收事件（电脑主动连飞书，不用公网地址），只认绑定过的主人。
@@ -914,10 +914,10 @@ def _open(path, dm, new=False):
 
 
 # ---------- 群：一个「项目 + 模式（+ 主位）」一个群 ----------
-#   主位助理：「项目 · 主位助理 · 主位名」，头像是主位的 Q 版头像（+ 文件夹角标）；选不同主位就是不同的群，互不影响
+#   助理：「助理 · 主位名 · 📁 项目」，头像是主位的 Q 版头像（+ 文件夹角标）；选不同主位就是不同的群，互不影响
 #   派活：「项目 · 派活」，头像是一圈队员；群聊：「项目 · 群聊」，头像是拉进来的那几位拼在一起
-MODES = {"lead": "主位助理", "work": "派活", "talk": "群聊"}
-MODE_COLOR = {"lead": "indigo", "work": "turquoise", "talk": "violet"}  # 一眼分清：主位助理靛蓝、派活青绿、群聊紫
+MODES = {"lead": "助理", "work": "派活", "talk": "群聊"}
+MODE_COLOR = {"lead": "indigo", "work": "turquoise", "talk": "violet"}  # 一眼分清：助理靛蓝、派活青绿、群聊紫
 
 
 def _gmeta(cid):
@@ -929,7 +929,7 @@ FOLDER = "📁"  # 群名里项目前面的文件夹标识（飞书群名只能�
 
 
 def _group_name(m):
-    """模式在前：「主位助理 · GPT · 📁 示例项目」「派活 · 📁 示例项目」「群聊 · 📁 示例项目」。"""
+    """模式在前：「助理 · GPT · 📁 示例项目」「派活 · 📁 示例项目」「群聊 · 📁 示例项目」。"""
     return " · ".join([MODES[m["mode"]]] + ([_name(m["lead"])] if m["mode"] == "lead" else []) + [f"{FOLDER} {m['project']}"])
 
 
@@ -1007,14 +1007,14 @@ def _post_new_chat(project):
 
 
 def _launcher_card(project, new=False):
-    """私聊里选好项目之后：① 选模式（主位助理还要选主位，群聊要选拉谁）② 点「进群开聊」，进这个组合对应的群。"""
+    """私聊里选好项目之后：① 选模式（助理还要选主位，群聊要选拉谁）② 点「进群开聊」，进这个组合对应的群。"""
     mode, lead = _group_mode(project), _group_lead(project)
     btns = [{"label": v, "type": "primary_filled" if k == mode else "default", "value": {"act": "gmode", "project": project, "mode": k}}
             for k, v in MODES.items()]
     els = [{"tag": "markdown", "content": "**① 选模式　② 点「进群开聊」**，进群后点「新建话题」写第一句话就开一个新对话"},
            _row(btns, "模式", "mode"), {"tag": "hr"}]
     if mode == "lead":
-        els.append(_md("**主位**　<font color='grey'>每位主位一个群：「项目 · 主位助理 · 主位名」</font>", "lead"))
+        els.append(_md("**主位**　<font color='grey'>每位主位一个群：「助理 · 主位名 · 📁 项目」</font>", "lead"))
         els += _grid([(a, _btn(_name(a), {"act": "glead", "project": project, "lead": a}, "primary_filled" if a == lead else "default"))
                       for a in _team()[:8]])
     elif mode == "work":
@@ -1070,7 +1070,7 @@ def _head(key, mid=None):
 
 
 def _mode_card(key):
-    """选了模式之后弹的那张：主位助理 → 选主位；派活 → 能 @ 的队员；群聊 → 一起聊的队员。"""
+    """选了模式之后弹的那张：助理 → 选主位；派活 → 能 @ 的队员；群聊 → 一起聊的队员。"""
     c = state()["chats"][key]
     if c["mode"] == "lead":
         cells = [(a, _btn(_name(a), {"act": "lead", "key": key, "lead": a}, "primary_filled" if a == c["lead"] else "default")) for a in _team()[:8]]
@@ -1370,7 +1370,7 @@ def _bill_card():
     return _card("今天的账单", md, elements=els, icon=_bus_icon(), sub="按队员和项目合计（进度条是剩余额度）")
 
 
-# ---------- 主位助理：这个聊天就是一个接入了 bus 的对话窗口 ----------
+# ---------- 助理：这个聊天就是一个接入了 bus 的对话窗口 ----------
 JOIN = ("（这是主人在飞书上新开的对话窗口，主人在手机上看，回复写短一点。先接入 agentbus：调用 agentbus_hello 工具，explicit 设为 true；"
         "没有这个工具就在终端运行 `agentbus hello --agent {lead}`。然后照握手信息干活。）")
 

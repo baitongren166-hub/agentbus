@@ -1921,7 +1921,7 @@
       + st(2, f.has_secret, "密钥存进本机", "App Secret 由你在系统弹窗里粘贴，存进钥匙串，主位看不到")
       + st(3, f.connected, "电脑连上飞书", f.connected ? "长连接已连上" : f.err ? esc(f.err) : "存好密钥后自动连")
       + st(4, f.owner, "在飞书里配对", f.owner ? "已绑定" : f.pair ? `飞书里搜机器人「${esc(f.bot_name)}」，私聊发配对码 <b class="code-inline">${esc(f.pair)}</b>` : "前面几步好了这里出配对码")
-      + `<div class="row col"><div class="lbl"><b>群怎么起名</b><span>一个「项目 + 模式（+ 主位）」一个群：主位助理 · GPT · 📁 示例项目　/　派活 · 📁 示例项目　/　群聊 · 📁 示例项目</span></div></div>`
+      + `<div class="row col"><div class="lbl"><b>群怎么起名</b><span>一个「项目 + 模式（+ 主位）」一个群：助理 · GPT · 📁 示例项目　/　派活 · 📁 示例项目　/　群聊 · 📁 示例项目</span></div></div>`
       + (f.app_id ? `<div class="row"><div class="lbl"><b>飞书接入</b><span>关掉后手机上就指挥不了了，配置都还在</span></div><button class="sw ${f.enabled ? "on" : ""}" data-fs="toggle" role="switch" aria-checked="${f.enabled}"></button></div>` : "");
     box._phrase = f.phrase;
 
