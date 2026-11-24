@@ -62,7 +62,7 @@ KNOWN_AGENTS = {
     "zcode":    {"name": "zcode", "caps": ["computer", "files", "code", "cheap"], "abbr": "Z", "vendor": "智谱 / DeepSeek", "bin": "zcode", "run": "zcode", "acts": "zcode",
                  "billing": "deepseek", "sprite": "zcode.png", "color": "#3f7fd0", "desc": "ZCode CLI，当前默认模型 DeepSeek"},
     # Google 的 agent：反重力 CLI（agy）。Gemini CLI 的个人免费额度 Google 已经停了，个人账号走反重力；id 沿用 gemini（职能、战备都不丢）
-    "gemini":   {"name": "Antigravity", "caps": ["files", "code", "long", "vision", "cn", "web"], "abbr": "AG", "vendor": "Google", "bin": "agy", "run": "agy", "acts": None,
+    "gemini":   {"name": "Antigravity", "caps": ["files", "code", "long", "vision", "cn", "web"], "abbr": "AG", "vendor": "Google", "bin": "agy", "run": "agy", "acts": "antigravity",
                  "billing": "antigravity", "sprite": "gemini.png", "color": "#7b6cf0", "desc": "反重力 CLI（agy），Google 个人账号的 Gemini 额度走它"},
     "dsh":      {"name": "DSH", "caps": ["files", "code", "cheap", "cn"], "abbr": "DSH", "vendor": "DeepSeek", "bin": "dsh", "run": "dsh", "acts": None,
                  "billing": "deepseek", "sprite": None, "color": "#8b6cf6", "desc": "DeepSeek Harness（dsh --profile headless），需要先配 API key"},
@@ -98,6 +98,10 @@ for _k, _exe in {"codex": "ChatGPT", "doubao": "Doubao", "codebuddy": "WorkBuddy
 # 可招募的 agent：怎么装（界面上点“招募”会先弹窗确认，把命令给用户看）
 #   npm：Node 包；uv：Python 工具；mac/win：只在那个系统上能用的安装脚本
 INSTALL_SPEC = {
+    "codex": {"npm": "@openai/codex"},
+    "opencode": {"npm": "opencode-ai"},
+    # ZCode 没有单独的命令行安装包：命令行藏在桌面版里，用桌面版自带的 Electron 当 node 跑（不用另装 Node.js）
+    "zcode": {"link": "zcode", "app": "ZCode", "script": "Contents/Resources/glm/zcode.cjs", "provider": "Contents/Resources/config/provider"},
     "codebuddy": {"npm": "@tencent-ai/codebuddy-code"},
     "qwen": {"npm": "@qwen-code/qwen-code"},
     "kimi": {"uv": "kimi-cli", "python": "3.13"},
@@ -105,6 +109,9 @@ INSTALL_SPEC = {
 }
 # 没有可靠一键安装命令的：招募时打开官网下载页（反重力的 agy 命令随桌面端一起装）
 INSTALL_GUIDE = {"gemini": "https://antigravity.google/download"}
+# 桌面版的官网下载页（只写确定的；没写的招募里就只显示命令行版）
+DESKTOP_URL = {"codex": "https://chatgpt.com/download", "opencode": "https://opencode.ai/download", "gemini": "https://antigravity.google/download",
+               "cursor": "https://cursor.com/download"}
 NEEDS = {"npm": ("npm", "Node.js", "https://nodejs.org"), "uv": ("uv", "uv（Python 工具管理）", "https://docs.astral.sh/uv/")}
 
 
@@ -130,6 +137,8 @@ def install_argv(aid, install_dir=None):
     if "npm" in spec:
         npm = shutil.which("npm") or "npm"
         return [npm, "install", "-g", *(["--prefix", d] if d else []), spec["npm"]], {}
+    if "link" in spec:
+        return None  # 不跑命令：由 service.link_cli 直接生成启动脚本
     if "uv" in spec:
         import os as _os
         env = {"UV_TOOL_DIR": _os.path.join(d, "tools"), "UV_TOOL_BIN_DIR": _os.path.join(d, "bin")} if d else {}
@@ -151,6 +160,8 @@ def install_cmd(aid, install_dir=None, os_name=None):
     except ValueError:
         d = None
     q = (lambda v: "'" + v.replace("'", "''") + "'") if win else shlex.quote  # PowerShell 单引号里只有 ' 要双写
+    if "link" in spec:
+        return None if win else f"从 {spec['app']} 桌面版接上命令行：生成 ~/.local/bin/{spec['link']}（不下载东西）"
     if "npm" in spec:
         return f'npm install -g --prefix {q(d)} {spec["npm"]}' if d else f"npm install -g {spec['npm']}"
     if "uv" in spec:
@@ -163,10 +174,37 @@ def install_cmd(aid, install_dir=None, os_name=None):
     return spec.get("win" if win else "mac")
 
 
+def uninstall_argv(aid, install_dir=None):
+    """卸载命令行版：npm / uv 装的按原路卸；link 的由 service 删启动脚本；官方脚本装的（Cursor）没有一键卸载。"""
+    import shutil
+    spec = INSTALL_SPEC.get(aid) or {}
+    try:
+        d = _install_dir(install_dir)
+    except ValueError:
+        d = None
+    if "npm" in spec:
+        return [shutil.which("npm") or "npm", "uninstall", "-g", *(["--prefix", d] if d else []), spec["npm"]], {}
+    if "uv" in spec:
+        import os as _os
+        env = {"UV_TOOL_DIR": _os.path.join(d, "tools"), "UV_TOOL_BIN_DIR": _os.path.join(d, "bin")} if d else {}
+        return [shutil.which("uv") or "uv", "tool", "uninstall", spec["uv"]], env
+    return None
+
+
+def install_how(aid):
+    spec = INSTALL_SPEC.get(aid) or {}
+    return next((k for k in ("npm", "uv", "link") if k in spec), "script" if spec else None)
+
+
 def install_needs(aid):
     """装之前要先有什么（比如 Node.js）；本机缺的话返回 (名字, 官网)。"""
     import shutil
     spec = INSTALL_SPEC.get(aid) or {}
+    if "link" in spec:
+        import sys
+        from pathlib import Path
+        if sys.platform != "darwin" or not Path(f"/Applications/{spec['app']}.app").is_dir():
+            return {"name": f"{spec['app']} 桌面版", "url": DESKTOP_URL.get(aid) or ""}
     for k, (cmd, name, url) in NEEDS.items():
         if k in spec and not shutil.which(cmd):
             return {"name": name, "url": url}

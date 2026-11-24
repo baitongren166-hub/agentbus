@@ -6,6 +6,7 @@ steps 把链路的每一步摆出来（找凭证 → 刷新令牌 → … → �
 凭证只在内存里用、只发给那一家的官方接口；不写日志、不改对方的凭证文件。
 新加一家：写一个查询函数，登记到 PROVIDERS。
 """
+import glob
 import json
 import os
 import subprocess
@@ -200,13 +201,26 @@ def _antigravity_ls():
             continue
         line = cmd
         csrf = _re.search(r"--csrf_token[= ](\S+)", line)
+        csrf = csrf.group(1) if csrf else ""
         ports = [int(m) for m in _re.findall(r"--(?:extension_server_port|https_server_port|http_server_port|server_port|lsp_port)[= ](\d+)", line)]
+        # 新版（2.3x 起，--subclient_type hub）令牌不放启动参数了：写在 <数据目录>/daemon/hub_<端口>.json（pid、httpsPort、httpPort、csrfToken）
+        for f in glob.glob(H("~/.gemini/antigravity*/daemon/*.json")):
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    d = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if isinstance(d, dict) and str(d.get("pid")) == pid and isinstance(d.get("csrfToken"), str) and d["csrfToken"]:
+                csrf = d["csrfToken"]
+                ports = [int(p) for p in (d.get("httpsPort"), d.get("httpPort")) if str(p).isdigit()] + ports
+                break
+        ports = [p for p in ports if p > 0]  # --https_server_port 0 = 随机端口，0 本身连不上
         try:  # 参数里没写端口（随机端口）：看这个进程在听哪些端口
             ls = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", pid], capture_output=True, text=True, timeout=5).stdout
             ports += [int(m) for m in _re.findall(r":(\d+) \(LISTEN\)", ls)]
         except (OSError, subprocess.SubprocessError):
             pass
-        return pid, csrf.group(1) if csrf else "", list(dict.fromkeys(ports))
+        return pid, csrf, list(dict.fromkeys(p for p in ports if 0 < p <= 65535))
     return None
 
 
@@ -241,16 +255,17 @@ def antigravity():
     ctx = ssl.create_default_context()
     ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # 本机自签证书，只连 127.0.0.1
     body = json.dumps({"metadata": {"ideName": "antigravity", "extensionName": "antigravity", "locale": "zh"}}).encode()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx))
     last = ""
     for port in ports:
         for scheme in ("https", "http"):
             req = urllib.request.Request(f"{scheme}://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus", data=body, method="POST",
                                          headers={"Content-Type": "application/json", "Connect-Protocol-Version": "1", "X-Codeium-Csrf-Token": csrf})
             try:
-                with urllib.request.urlopen(req, timeout=4, context=ctx if scheme == "https" else None) as r:
+                with opener.open(req, timeout=4) as r:
                     data = json.loads(r.read() or b"{}")
             except Exception as e:
-                last = f"{scheme}:{port} {type(e).__name__}: {str(e)[:80]}"
+                last = f"{scheme}:{port} {type(e).__name__}"
                 continue
             wins = []
             _find_quota(data, wins)

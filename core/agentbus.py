@@ -97,6 +97,13 @@ def board_read(bus):
     return out
 
 
+def _read_text(p):
+    try:
+        return Path(p).read_text("utf-8", "ignore")
+    except OSError:
+        return ""
+
+
 def build_prompt(agent, name, root, bus, task, sender, pb_block=""):
     parts = [f"# 你是 {agent}，在「{name}」项目里接活，派活的是 {sender}"]
     for f in (bus / "brief.md", bus / "roles" / f"{agent}.md"):
@@ -435,6 +442,9 @@ def run_agent(agent_id, a, root, prompt, session, run_file):
             except OSError:
                 pass
     env = dict(os.environ, PWD=str(root), AGENTBUS_SELF=agent_id, AGENTBUS_DEPTH=str(int(os.environ.get("AGENTBUS_DEPTH", "0")) + 1), AGENTBUS_CONV=conv_id())
+    env.pop("AGENTBUS_HEADLESS", None)
+    if env.pop("AGENTBUS_WINDOW", None):  # 无头窗口是主位不是队员：层数不加，接入握手时按无头的规矩给它说怎么等回音
+        env.update(AGENTBUS_DEPTH=os.environ.get("AGENTBUS_DEPTH", "0"), AGENTBUS_HEADLESS="1")
     kind = a["run"]
     import pf
     if len(prompt) > pf.ARG_LIMIT and kind not in ("codex", "claude", "api", "doubao"):
@@ -445,8 +455,16 @@ def run_agent(agent_id, a, root, prompt, session, run_file):
         prompt = f"完整任务书在 {pf_file}，先完整读一遍，再按里面的要求开工。"
     if kind == "codex":
         out = run_file.with_suffix(".last.md")
-        out.unlink(missing_ok=True)
+        if out.exists():
+            # 每轮输出用独立文件，避免失败时读取上一轮回复。
+            import uuid
+            out = run_file.with_suffix(f".{uuid.uuid4().hex[:8]}.last.md")
         base = ["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--json", "-o", str(out)] + brains.flags("codex", brain)
+        if env.get("AGENTBUS_HEADLESS") and "[mcp_servers.agentbus]" in _read_text(Path.home() / ".codex" / "config.toml"):
+            # Codex 起 MCP 时不传父进程的环境变量：把窗口的会话编号交给 agentbus 的 MCP，它派的活和回音才认得是这个窗口
+            for k in ("AGENTBUS_CONV", "AGENTBUS_HEADLESS", "AGENTBUS_FEISHU", "AGENTBUS_SELF"):
+                if env.get(k):
+                    base += ["-c", f"mcp_servers.agentbus.env.{k}={json.dumps(env[k])}"]
         cmd = ["codex", "exec", "resume", session, *base, "-"] if session else ["codex", "exec", *base, "-"]
         p = _run(kind, cmd, input=prompt, cwd=root, env=env, capture_output=True, text=True, session=session)
         sid, tok, errs = session, {"input": 0, "output": 0, "cache": 0}, []
@@ -467,6 +485,8 @@ def run_agent(agent_id, a, root, prompt, session, run_file):
         if failed or p.returncode or (not text and errs):
             detail = "；".join(dict.fromkeys(errs)) or (p.stderr or "").strip() or f"退出码 {p.returncode}"
             return f"（codex 出错：{detail[:600]}）", sid, p.stdout, tok
+        if text and out != run_file.with_suffix(".last.md"):
+            out.replace(run_file.with_suffix(".last.md"))
         return text or f"（codex 没有回复，退出码 {p.returncode}）\n{p.stderr[-2000:]}", sid, p.stdout, tok
     if kind == "agy":  # 反重力 CLI：-p 单次执行，stream-json 边跑边吐每一步（init 带会话号，最后一条 result 和 json 格式的结果一样）
         cmd = ["agy", "-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions"] + brains.flags("agy", brain)
@@ -611,6 +631,17 @@ def fmt_cost(billing, c):
 def cmd_ask(a):
     if int(os.environ.get("AGENTBUS_DEPTH", "0")) >= MAX_DEPTH:
         sys.exit("派活层数到顶了，这件事请自己做完或在回复里交给总指挥。")
+    if getattr(a, "detach", False):  # 后台派：交给独立的派活进程，主位这一轮结束（连带它起的子进程被收掉）也不受影响
+        import mcp_server
+        try:
+            jid = mcp_server.start_job({"agent": a.agent, "task": sys.stdin.read() if a.task == "-" else a.task, "new": a.new,
+                                        "tag": a.tag or os.environ.get("AGENTBUS_TAG"), "file": a.file, "title": a.title,
+                                        "project": a.project or os.environ.get("AGENTBUS_PROJECT"), "sender": a.sender,
+                                        "allow_credits": a.allow_credits}, cwd=os.getcwd())
+        except (OSError, ValueError) as e:
+            sys.exit(str(e))
+        print(f"[agentbus] 已在后台派出（工单 {jid}），做完会有回音。")
+        return
     if a.project is None and not os.environ.get("AGENTBUS_PROJECT"):
         from config import project_of_dir
         a.project = project_of_dir()  # 从哪个项目目录派的就记在哪个项目下
@@ -644,7 +675,7 @@ def cmd_ask(a):
         task += "\n\n" + Path(a.file).read_text("utf-8")
     from config import touch_lead, whoami
     sender = a.sender or whoami() or lead_of_cfg(cfg) or "claude"
-    if not os.environ.get("AGENTBUS_CHAT"):  # 消息窗口里的接力（队员 @ 队员）不算谁在统筹，不改主位
+    if not os.environ.get("AGENTBUS_CHAT") and not os.environ.get("AGENTBUS_FEISHU"):  # 消息窗口里的接力、飞书话题的主位都不改电脑上的主位
         touch_lead(sender, "ask", conv_id())
     sessions = load_json(bus / "sessions.json", {})
     conv = conv_id()
@@ -676,7 +707,8 @@ def cmd_ask(a):
     sk = mounted_skills(cfg, sender, str(root))
     if sk:  # 主人给这间办公室 / 这个文件夹装的 skill：只给目录和说明，用到哪个再读（不把整份塞进来）
         block += "\n\n## 这里装了这些 skill（用得上就先完整读它的 SKILL.md 再照做）\n" + "\n".join(f"- {n}：{d[:160]}（{p}/SKILL.md）" for n, d, p in sk)
-    prompt = build_prompt(agent_id, name, root, bus, task, sender, block)
+    # 飞书等处新开的对话窗口（无头主位）：主人的话原样交过去，不套队员的身份说明，它自己接入 bus
+    prompt = task if os.environ.get("AGENTBUS_WINDOW") else build_prompt(agent_id, name, root, bus, task, sender, block)
     if pb_step or pb_lessons:
         playbook.bump(pb_bus, pb_step, pb_lessons)
         print(f"[agentbus] 带上经验包：{pb_step['name'] if pb_step else '（无对应步骤）'} + {len(pb_lessons)} 条经验"
@@ -903,7 +935,7 @@ def _finish(v):
     ledger_add({"id": run_id, "project": name, "batch": batch, "agent": agent_id, "billing": billing, "tag": tag,
                 "task": v["first"], "start": t0, "end": t1, "seconds": round(t1 - t0), "ok": ok, "status": v.get("status") or ("ok" if ok else "failed"), "frm": sender,
                 "reply": text[:600], "before": _slim(v["before"]), "after": _slim(after), "cost": cost, "tokens": tok, "overlap": v["others"],
-                "settle_at": t1 + 240 if billing == "deepseek" else None, "conv": conv[:12], "brain": _CUR.get("brain"), "backend": v.get("backend")})
+                "settle_at": t1 + 240 if billing == "deepseek" else None, "conv": conv[:12], "brain": _CUR.get("brain"), "backend": v.get("backend"), "job": os.environ.get("AGENTBUS_JOB")})
     board_add(bus, kind="reply", frm=agent_id, to=sender, text=text, run=run_file.name, tag=tag, batch=batch,
               cost=cost, seconds=round(t1 - t0), ok=ok, status=v.get("status"), conv=conv[:12])
     if os.environ.get("AGENTBUS_CHAT"):  # 消息里 @ 来的活：回复发回群里；回复里 @ 了别人就接力派下去（有循环保护）
@@ -911,9 +943,11 @@ def _finish(v):
             import chat
             channel = os.environ["AGENTBUS_CHAT"]
             if ok:
-                chat.send(channel, text, frm=agent_id, hops=int(os.environ.get("AGENTBUS_CHAT_HOPS", "0")))
+                chat.send(channel, text, frm=agent_id, hops=int(os.environ.get("AGENTBUS_CHAT_HOPS", "0")), cwd=str(root),
+                          reply_job=os.environ.get("AGENTBUS_JOB"))
             else:
-                chat.failure(channel, ag, v.get("status"), text)
+                chat.failure(channel, ag, v.get("status"), text, reply_job=os.environ.get("AGENTBUS_JOB"),
+                             source=os.environ.get("AGENTBUS_CHAT_SOURCE"), retried=a.allow_credits)
         except Exception as e:
             print(f"[agentbus] 回复发回群里失败：{e}", file=sys.stderr)
     print(text)
@@ -1045,11 +1079,8 @@ def cmd_wait(a):
 
 
 def _pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
+    import pf
+    return pf.pid_alive(pid)
 
 
 def load_ledger_ids(ids):
@@ -1136,10 +1167,25 @@ def join_brief(agent):
         return None
 
 
+def _ag_user_turn(sid):
+    """反重力这次调用模型是不是紧跟着主人刚发的话（对话记录最后一步是 USER_INPUT），而不是一轮里的后续步骤。"""
+    if not sid or not re.fullmatch(r"[\w-]+", sid):
+        return False
+    from activity import AG_ROOTS, tail_lines
+    for r in AG_ROOTS:
+        f = os.path.expanduser(f"{r}/brain/{sid}/.system_generated/logs/transcript.jsonl")
+        if os.path.exists(f):
+            try:
+                return json.loads(tail_lines(f, 100_000)[-1]).get("type") == "USER_INPUT"
+            except (OSError, ValueError, IndexError):
+                return False
+    return False
+
+
 def cmd_hook(a):
     d = _hook_input()
     # 被派活起来的 agent（队员）：它的新会话不是主人开的窗口——不问接入、不塞握手、不报回音（派活时 agentbus 会设这些环境变量）
-    if int(os.environ.get("AGENTBUS_DEPTH", "0") or 0) > 0 or os.environ.get("AGENTBUS_CHAT"):
+    if int(os.environ.get("AGENTBUS_DEPTH", "0") or 0) > 0 or os.environ.get("AGENTBUS_CHAT") or os.environ.get("AGENTBUS_FEISHU"):
         return
     # 各家钩子的输入字段名不一样：Claude/Codex/ZCode/CodeBuddy 是 session_id，反重力是 camelCase 的 conversationId
     sid = d.get("session_id") or d.get("thread_id") or d.get("conversationId") or d.get("sessionId") or d.get("sessionID") or ""
@@ -1166,6 +1212,9 @@ def cmd_hook(a):
             out.append("（这个窗口已接入 agentbus，按 bus 的规矩派活、等回音。）")
     elif a.event == "prompt":
         j = joined.get(conv)
+        # 反重力的新对话靠被动检测，询问在主人发出第一句后才弹、15 秒没理就收起：主人下一次发话时补问一次（服务那边只补一次）
+        if not j and agent == "gemini" and mode == "ask" and _ag_user_turn(d.get("session_id")):
+            _post("/api/session/new", {"agent": agent, "conv": conv, "again": True})
         if j and not j.get("briefed") and not j.get("declined"):
             brief = join_brief(agent)
             if brief:  # 握手生成成功才算送到；失败这次只提示一句，下一句话再试
@@ -1189,8 +1238,34 @@ def cmd_hook(a):
         rs = unseen_results()
         if rs:
             out.append("[agentbus 回音] 你派出去的活有新结果，先处理再继续：\n" + "\n\n".join(_result_text(r) for r in rs))
+        if j and j.get("briefed") and not j.get("declined"):  # 主人在 agentbus 界面上交代给主位的事（比如一键接入飞书）：交给第一个开口的主位窗口
+            task = take_lead_task(agent, conv)
+            if task:
+                out.append("[agentbus 主人交代] " + task)
     if out:
         print(hook_output(agent, a.event, "\n\n".join(out)))
+
+
+LEAD_TASKS = HOME / "lead_tasks.json"
+
+
+def add_lead_task(text, agent=None, conv=None):
+    """主人在界面上点了要主位去办的事：记下来，主位窗口下一句话时送进去（一天内有效）。同一件事只留最新一条。"""
+    update_json(LEAD_TASKS, lambda d: d.update(tasks=[t for t in d.get("tasks", []) if t.get("text") != text] + [{"text": text, "t": time.time(), "agent": agent, "conv": conv}]))
+
+
+def take_lead_task(agent=None, conv=None):
+    got = {}
+
+    def pop(d):
+        ts = [t for t in d.get("tasks", []) if time.time() - t.get("t", 0) < 86400]
+        for i, task in enumerate(ts):
+            if task.get("agent") in (None, agent) and task.get("conv") in (None, conv):
+                got["t"] = ts.pop(i)
+                break
+        d["tasks"] = ts
+    update_json(LEAD_TASKS, pop)
+    return (got.get("t") or {}).get("text")
 
 
 def hook_output(agent, event, text):
@@ -1424,7 +1499,12 @@ def main():
     s.add_argument("--new", action="store_true", help="开新会话"); s.add_argument("--file", help="把文件内容附在任务后面")
     s.add_argument("--tag", help="这活属于哪个岗位词条"); s.add_argument("--from", dest="sender")
     s.add_argument("--title", help="十来个字的短标题，悬浮窗和任务列表显示它（不写就从任务里自动提炼）")
-    s.add_argument("--allow-credits", action="store_true", help="GPT 额度用完后仍然派（会扣付费 credits）"); s.set_defaults(f=cmd_ask)
+    s.add_argument("--allow-credits", action="store_true", help="GPT 额度用完后仍然派（会扣付费 credits）")
+    s.add_argument("--detach", action="store_true", help="后台派：马上返回工单号，做完有回音（无头主位用，派活进程不跟着主位退出）"); s.set_defaults(f=cmd_ask)
+    s = sub.add_parser("feishu", help="飞书接入：setup <App ID> / code / status / on / off / lead <agent> / unbind")
+    s.add_argument("args", nargs="*")
+    s.add_argument("--again", action="store_true", help="重新输入飞书 App Secret")
+    s.set_defaults(f=lambda a: __import__("feishu").cli(a.args + (["--again"] if a.again else [])))
     s = sub.add_parser("wait", help="等派出去的活做完：默认任意一单做完就返回（Bash 后台跑，做完会叫醒主位）")
     s.add_argument("jobs", nargs="*", help="MCP 派活返回的 job id，不写就等这个窗口派出去的全部")
     s.add_argument("--all", action="store_true", help="等全部做完才返回"); s.add_argument("--timeout", type=float, default=240, help="最多等几分钟")

@@ -530,7 +530,7 @@ def is_working_as_member(agent):
 
 def touch_lead(agent, via="", conv=""):
     """有 agent 在用 agentbus 统筹（MCP 接入、握手、派活）：记成当前主位。队员（派活层数 ≥ 1）不算。"""
-    if not agent or int(os.environ.get("AGENTBUS_DEPTH", "0")) > 0 or is_working_as_member(agent):
+    if not agent or os.environ.get("AGENTBUS_FEISHU") or int(os.environ.get("AGENTBUS_DEPTH", "0")) > 0 or is_working_as_member(agent):
         return
     if conv:  # 单间登记：哪个窗口、谁在统筹、在哪个文件夹（悬浮窗给单间起名用）
         r = load_json(ROOMS_FILE, {}).get(conv[:12]) or {}

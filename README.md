@@ -144,7 +144,7 @@ agentbus bill                                                                   
 
 ## Data and privacy
 
-- Everything runs locally and lives in `~/.agentbus/` (override with `AGENTBUS_HOME`). No cloud, no telemetry; the only network call is the optional update check against GitHub Releases.
+- AgentBus stores its data locally in `~/.agentbus/` (override with `AGENTBUS_HOME`) and collects no telemetry. Configured agents, balance providers, and the optional update check use their respective services. The opt-in Feishu integration sends project names, cards, messages and attachments used in Feishu chats to Feishu.
 - API keys go to the macOS Keychain, Windows DPAPI, or a user-only file on Linux; the UI and logs only show fingerprints. A key agentbus discovers can only be sent to the host it was configured for.
 - The service listens on `127.0.0.1` only, rejects cross-site browser requests, and only accepts changes from processes of the same system user.
 - Installing hooks backs up the other agent's config first and only touches agentbus's own entries; uninstalling restores what was there.

@@ -23,7 +23,7 @@
   const focus = () => !!(S && S.settings.hud.focus);
   // 鼠标移到收起的悬浮窗上：旁边弹出一颗专注圆按钮，移开就收。
   // 窗口两边一直留着放按钮的透明空间（顶部 / 底部 / 悬浮时两边各留，胶囊保持居中），这块空间点得穿
-  const PEEK = 96;
+  const PEEK = 186; // 专注模式 + 出门模式两颗按钮并排（各约 84 宽，中间 6）
   let peekOn = false, peekT = null;
   const peekEl = $("#peek"); // 有新对话在问接不接入：收起时也用透明横排，卡片和胶囊并排
   let officeSel = null; // 在面板里看哪一间办公室
@@ -497,6 +497,16 @@
   const MOON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 14.6A8.2 8.2 0 0 1 9.4 3.8a8.6 8.6 0 1 0 10.8 10.8z" fill="currentColor"/></svg>`;
   // 苹果控制中心那种：月亮圆标 + 「专注模式」，开着时圆标是靛蓝底；比胶囊矮一点，中线对齐
   const focusBtn = () => `<button class="fz ${focus() ? "on" : ""}" data-focus title="${focus() ? "专注模式已开：只保持收起，不自动弹出（点一下关）" : "专注模式：只保持收起，不自动弹出"}" aria-pressed="${focus()}"><span class="fz-ic">${MOON}</span><span class="fz-t">专注模式</span></button>`;
+  // 出门模式：电脑不睡、硬盘不停转，笔记本合盖也不睡，好在手机上继续指挥；开着时圆标是橙色，有哪项不在线就加个红点
+  const BAG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6a2 2 0 0 1 2 2v1h2.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-9A1.5 1.5 0 0 1 4.5 7H7V6a2 2 0 0 1 2-2zm0 2v1h6V6H9z" fill="currentColor"/></svg>`;
+  const away = () => (S && S.away) || {};
+  const awayTip = () => {
+    const a = away(), bad = (a.bad || []).map(c => `${c.name}：${c.detail}`).join("；");
+    if (a.on) return `出门模式已开：电脑不睡${a.lid ? "、合盖也不睡" : ""}（点一下关）${bad ? "。注意 → " + bad : ""}`;
+    return `出门模式：电脑不睡、硬盘不停转${a.laptop ? "，笔记本合盖也不睡" + (a.authorized ? "" : "（第一次会让你输一次开机密码授权）") : ""}`;
+  };
+  const awayBtn = () => `<button class="fz aw ${away().on ? "on" : ""}" data-away title="${esc(awayTip())}" aria-pressed="${!!away().on}"><span class="fz-ic">${BAG}${(away().bad || []).length ? '<i class="aw-dot"></i>' : ""}</span><span class="fz-t">出门模式</span></button>`;
+  const peekHTML = () => `<div class="fzs">${focusBtn()}${awayBtn()}</div>`;
   // 贴着胶囊（或小人、接入卡片）实际露出来的那一截放，竖直方向和胶囊中线对齐；
   // 用 offset 尺寸，不受弹出动画的缩放影响
   function placePeek() {
@@ -513,7 +523,7 @@
   function showPeek() {
     clearTimeout(peekT);
     if (open || dragging) return;
-    if (!peekOn) { peekOn = true; set(peekEl, focusBtn()); peekEl.hidden = false; placePeek(); }
+    if (!peekOn) { peekOn = true; set(peekEl, peekHTML()); peekEl.hidden = false; placePeek(); }
     requestAnimationFrame(() => { if (peekOn && !open && !dragging) peekEl.classList.add("in"); }); // 这一帧之前面板打开了就不再显示
   }
   function hidePeek(now) {
@@ -541,12 +551,28 @@
   window.addEventListener("resize", placePeek);
   // 胶囊文字一变（轮播谁在干什么）宽度就变：按钮跟着挪，永远贴在胶囊外侧，不会压上去
   if (window.ResizeObserver) { const ro = new ResizeObserver(() => { if (peekOn) placePeek(); }); ro.observe(row); ro.observe(pill); ro.observe(island); }
-  peekEl.addEventListener("click", e => {
+  let awayBusy = false;
+  peekEl.addEventListener("click", async e => {
+    if (e.target.closest("[data-away]")) {
+      if (awayBusy) return;
+      awayBusy = true;
+      try {
+        const on = !away().on;
+        const post = body => fetch("/api/away", { method: "POST", body: JSON.stringify(body) }).then(r => r.ok ? r.json() : null).catch(() => null);
+        if (on && away().laptop && !away().authorized) await post({ authorize: true });
+        const r = await post({ on });
+        if (r && S) S.away = { ...r, bad: (r.checks || []).filter(c => !c.ok) };
+        set(peekEl, peekHTML());
+      } finally {
+        awayBusy = false;
+      }
+      return;
+    }
     if (!e.target.closest("[data-focus]")) return;
     const on = !focus();
     S.settings.hud.focus = on;
     fetch("/api/settings", { method: "POST", body: JSON.stringify({ hud: { focus: on } }) });
-    set(peekEl, focusBtn());
+    set(peekEl, peekHTML());
     document.body.classList.toggle("focus", on);
   });
   function badge() {
@@ -706,6 +732,10 @@
     if (hideMin > 0 && idle >= hideMin && !idleHidden) { idleHidden = true; invoke("hud_visible", { on: false }); }
     else if (ballMin > 0 && idle >= ballMin && !ball) { ball = true; document.body.classList.add("ball"); lastWin = null; render(); }
   }, 15000);
+  // 报平安：应用 45 秒收不到就重新加载悬浮窗（第一次加载时服务没起来、网页进程崩了都会变成一块看不见的透明窗）
+  // 老版本应用没有这条命令，失败不上报
+  const beat = () => { if (S && T && T.core) T.core.invoke("hud_beat").catch(() => {}); };
+  setInterval(beat, 10000);
   // 有好几个在干活时，胶囊每 4 秒换一个
   setInterval(() => { if (S && !open && (S.running.length > 1 || S.agents.filter(a => a.state === "working").length > 1)) { pill.dataset.html = ""; render(); } }, 4000);
 
@@ -730,6 +760,7 @@
     s = withHello(s);
     const prev = S;
     S = s;
+    if (!prev) beat();
     if (s.chat_rev !== chatRev) { chatRev = s.chat_rev; if (open && tab === "chat") loadChat(); }
     const h = s.settings.hud;
     if (!prev || h.dock !== edge || (edge === "float" && (h.float_x !== (prev && prev.settings.hud.float_x) || h.float_y !== (prev && prev.settings.hud.float_y)))) { applyDock(h); lastWin = null; }

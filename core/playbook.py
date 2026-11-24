@@ -169,6 +169,9 @@ def prompt_block(pb, step, lessons, personal=None, mine=None):
             lines.append(f"- 这一步按主人的习惯改：{personal['steps'][step['id']]['note']}")
         lines += [f"- {x['text']}" for x in mine]
         parts.append("### 主人自己的习惯（和下面经验包冲突时，以这里为准）\n" + "\n".join(lines))
+    auto = (personal.get("auto") or {}).get(step["id"]) if step else None
+    if auto:  # 导入时按这台电脑自动迁移出来的改法：原作者的工具、队员这里不一定有
+        parts.append("### 这台电脑和原作者不一样（以这里为准）\n" + "\n".join(f"- {x}" for x in auto))
     if step:
         body = step["body"]
         parts.append(f"### 你负责的这一步：{step['name']}\n{body[:3000]}" + ("…" if len(body) > 3000 else ""))
@@ -359,6 +362,10 @@ def export_pack(bus, root, hide_names=True):
     names = [man.get("author", "")] if hide_names else []
     files = [d / f for f in PACK_FILES if (d / f).exists()] + sorted((d / "steps").glob("*/SKILL.md"))
     report = {}
+    try:  # 要用到的东西：在作者电脑上扫，写进 manifest，别人导入时据此检查、自动改做法
+        reqs = scan_requires(load(bus), root)
+    except Exception:
+        reqs = []
     EXPORTS.mkdir(parents=True, exist_ok=True)
     out = EXPORTS / f"{re.sub(r'[^0-9A-Za-z一-龥_-]+', '-', man.get('name', 'pack'))}-v{man.get('version', '1')}.agentpack.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
@@ -371,8 +378,18 @@ def export_pack(bus, root, hide_names=True):
                 m = json.loads(t)
                 m["exported"] = time.strftime("%Y-%m-%d")
                 m.pop("source", None)  # 原始文档在主人电脑上，别人拿不到
+                m["requires"] = [{k: (_sanitize(v, root, names)[0] if isinstance(v, str) else v) for k, v in r.items()} for r in reqs]
                 t = json.dumps(m, ensure_ascii=False, indent=2)
             z.writestr(rel, t)
+        for r in reqs:  # 项目里的小脚本整份带上（同样脱敏）
+            if r.get("bundled"):
+                t, hits = _sanitize((Path(root) / r["rel"]).read_text("utf-8", errors="replace"), root, names)
+                for k, v in hits.items():
+                    report[k] = report.get(k, 0) + v
+                z.writestr("tools/" + r["rel"], t)
+    if reqs:
+        report["带上的脚本"] = sum(1 for r in reqs if r.get("bundled"))
+        report["记下的依赖"] = len(reqs)
     return out, report
 
 
@@ -390,7 +407,8 @@ def import_pack(bus, root, data):
     names = z.namelist()
     if "manifest.json" not in names:
         raise ValueError("这不是经验包（缺 manifest.json）")
-    ok = [n for n in names if n in PACK_FILES or re.fullmatch(r"steps/[\w.-]+/SKILL\.md", n)]
+    ok = [n for n in names if n in PACK_FILES or re.fullmatch(r"steps/[\w.-]+/SKILL\.md", n)
+          or (n.startswith("tools/") and _bundle_path(n[len("tools/"):]))]
     if len(ok) > 500 or sum(z.getinfo(n).file_size for n in ok) > 20 * 1024 * 1024:
         raise ValueError("经验包太大（文件数或解压后大小超出上限）")
     files = {}
@@ -427,7 +445,22 @@ def import_pack(bus, root, data):
                 backup = d.with_name("playbook.bak-" + time.strftime("%m%d-%H%M%S") + f"-{k}")
             d.rename(backup)
         stage.rename(d)
-    return {"name": man.get("name"), "steps": len([n for n in ok if n.startswith("steps/")]), "backup": str(backup) if backup else None}
+    placed = []
+    for n, t in files.items():  # 包里带的脚本放回项目里同样的位置；已经有的不覆盖
+        if n.startswith("tools/"):
+            dest = Path(root) / n[len("tools/"):]
+            try:
+                dest.resolve().relative_to(Path(root).resolve())
+            except ValueError:
+                continue
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with dest.open("x", encoding="utf-8") as out:
+                    out.write(t)
+            except FileExistsError:
+                continue
+            placed.append(n[len("tools/"):])
+    return {"name": man.get("name"), "steps": len([n for n in ok if n.startswith("steps/")]), "backup": str(backup) if backup else None, "placed": placed}
 
 
 def proposals(bus):
@@ -505,3 +538,233 @@ def merge_context(pb, root, bus):
               "4. 不要打开 agentbus 的「派活时带经验包」，队员照本地文档干活。",
               "5. 改完告诉主人改了哪些文件、各加了几条。"]
     return "\n".join(lines)
+
+
+# ---------- 可迁移：经验包带上「要用到的东西」清单，导入时按这台电脑的阵容和工具自动改 ----------
+# 导出时在作者电脑上扫一遍：步骤里提到的文件、脚本、资料库、skill、MCP、命令行工具，各记一条进 manifest.requires；
+# 项目里的小脚本直接打进包（tools/ 下，导入时放回项目同样位置，不覆盖已有的）。
+# 导入时在使用者电脑上再查一遍：有的打勾，没有的给每一步写一句“这里没有 X，改用 Y”，进个人层，派活时自动带上。
+# 每一步按岗位找人；岗位没人挂就按需要的能力从本机能派活的队员里挑；谁都干不了就标“主人或主位自己做”。
+# 全部规则判断，不调 AI、不耗额度。
+BUNDLE_MAX, BUNDLE_TOTAL = 256 * 1024, 5 * 1024 * 1024
+BUNDLE_EXT = {".py", ".mjs", ".js", ".sh", ".md", ".json", ".txt", ".csv", ".yaml", ".yml", ".toml", ".swift", ".applescript"}
+BASE_CMDS = {"sh", "bash", "zsh", "python", "python3", "node", "cat", "ls", "cd", "cp", "mv", "mkdir", "rm", "grep", "sed", "awk",
+             "head", "tail", "open", "echo", "find", "git", "curl", "wc", "sort", "touch", "agentbus", "npx", "npm", "pip", "pip3"}
+SKILL_DIRS = ("~/.claude/skills", "~/.codex/skills", "~/.agents/skills", "~/.config/opencode/skill", "~/.config/opencode/skills",
+              "~/.gemini/skills", "~/.zcode/skills", "~/.codebuddy/skills")
+FALLBACK = {
+    "file": "这台电脑上没有「{name}」（原作者项目里的文件）：用到它的地方改用你现有的办法完成，做不到的在回复里写明缺这个文件。",
+    "dir": "这台电脑上没有「{name}」（原作者自己攒的资料库 / 文件夹）：跳过从它里面取，改用上网搜或你手上有的资料，回复里说明换成了什么。",
+    "skill": "这台电脑没装「{name}」skill：照这一步的文字要求自己做，不要去调用它。",
+    "mcp": "这台电脑没接「{name}」工具（MCP）：用你自己的能力完成同样的事，做不到的在回复里写明。",
+    "cli": "这台电脑没有「{name}」命令：先看能不能装上（比如 brew / pip / npm），装不上就换别的办法，回复里说明。",
+}
+KIND_NAMES = {"file": "项目文件", "dir": "资料库 / 文件夹", "skill": "Skill", "mcp": "MCP 工具", "cli": "命令行工具"}
+
+
+def _texts(pb):
+    """(步骤 id 或 None, 文本)：每一步的正文、工作流总表、经验条目。"""
+    out = [(s["id"], s["body"]) for s in pb["steps"]]
+    out.append((None, pb.get("workflow") or ""))
+    by_tag = {}
+    for s in pb["steps"]:
+        for t in s["tags"]:
+            by_tag.setdefault(t, s["id"])
+    for x in pb["lessons"]:
+        sid = next((by_tag[t] for t in (x.get("tags") or []) if t in by_tag), None)
+        out.append((sid, x.get("text") or ""))
+    return out
+
+
+def _installed_skills():
+    names = {}
+    for d in SKILL_DIRS:
+        p = Path(os.path.expanduser(d))
+        if p.is_dir():
+            for f in p.glob("*/SKILL.md"):
+                names.setdefault(f.parent.name, str(f.parent))
+    for f in Path(os.path.expanduser("~/.claude/plugins")).glob("**/skills/*/SKILL.md") if Path(os.path.expanduser("~/.claude/plugins")).is_dir() else []:
+        names.setdefault(f.parent.name, str(f.parent))
+    return names
+
+
+def _installed_mcps():
+    names = set()
+    try:
+        d = json.loads(Path(os.path.expanduser("~/.claude.json")).read_text("utf-8"))
+        names |= set((d.get("mcpServers") or {}).keys())
+        for p in (d.get("projects") or {}).values():
+            names |= set((p.get("mcpServers") or {}).keys())
+    except (OSError, ValueError, AttributeError):
+        pass
+    for f in ("~/.codex/config.toml", "~/.zcode/config.toml"):
+        try:
+            names |= set(re.findall(r"^\[mcp_servers\.([\w-]+)\]", Path(os.path.expanduser(f)).read_text("utf-8"), re.M))
+        except OSError:
+            pass
+    for f in ("~/.gemini/settings.json", "~/.config/opencode/opencode.json", "~/.cursor/mcp.json"):
+        try:
+            d = json.loads(Path(os.path.expanduser(f)).read_text("utf-8"))
+            names |= set((d.get("mcpServers") or d.get("mcp") or {}).keys())
+        except (OSError, ValueError, AttributeError):
+            pass
+    return names
+
+
+PATH_RE = re.compile(r"(?:/Volumes|/Users|/home|~)/[^\s`'\"）)，,。；;：:]+")
+TICK_RE = re.compile(r"`([^`\n]{2,200})`")
+
+
+def _bundle_path(rel):
+    """经验包里的脚本路径使用 POSIX 相对路径，并拒绝隐藏配置和跨平台路径分隔符。"""
+    return (bool(rel) and all(part and not part.startswith(".") for part in rel.split("/"))
+            and not any(c in rel for c in "\\:\0") and Path(rel).suffix.lower() in BUNDLE_EXT)
+
+
+def scan_requires(pb, root):
+    """在作者电脑上扫：经验包里用到、但别人电脑上不一定有的东西。返回 requires 列表（路径没脱敏，导出时再脱）。"""
+    import shutil
+    root = Path(root)
+    skills, mcps = _installed_skills(), _installed_mcps()
+    found = {}
+
+    def add(kind, name, sid, **kw):
+        k = (kind, name)
+        r = found.setdefault(k, dict({"kind": kind, "name": name, "steps": []}, **kw))
+        if sid and sid not in r["steps"]:
+            r["steps"].append(sid)
+    for sid, text in _texts(pb):
+        for m in PATH_RE.finditer(text):  # 绝对路径：项目里的算项目文件，项目外的是作者自己的资料库
+            p = Path(os.path.expanduser(m.group(0).rstrip(".")))
+            try:
+                rel = p.resolve().relative_to(root.resolve())
+                add("dir" if p.is_dir() else "file", rel.as_posix(), sid, rel=rel.as_posix())
+            except (ValueError, OSError):
+                add("dir" if p.is_dir() or not p.suffix else "file", p.name or str(p), sid, ref=str(p))
+        for m in TICK_RE.finditer(text):  # 反引号里的：相对路径、命令
+            toks = m.group(1).split()
+            for i, t in enumerate(toks):
+                t = t.strip("'\"")
+                if PATH_RE.match(t):
+                    continue
+                if "/" in t or Path(t).suffix.lower() in BUNDLE_EXT:
+                    p = root / t
+                    if p.exists():
+                        add("dir" if p.is_dir() else "file", t.rstrip("/"), sid, rel=t.rstrip("/"))
+                elif i == 0 and re.fullmatch(r"[\w.-]+", t) and t not in BASE_CMDS and shutil.which(t):
+                    add("cli", t, sid)
+        low = text.lower()
+        for n in skills:
+            if len(n) >= 3 and re.search(rf"(?<![\w-]){re.escape(n.lower())}(?![\w-])", low) and ("skill" in low or "/" + n.lower() in low):
+                add("skill", n, sid)
+        for n in mcps:
+            if len(n) >= 3 and re.search(rf"(?<![\w-]){re.escape(n.lower())}(?![\w-])", low):
+                add("mcp", n, sid)
+    out = list(found.values())
+    total = 0
+    for r in out:  # 项目里的小文本文件打进包
+        rel = r.get("rel")
+        if r["kind"] == "file" and rel and _bundle_path(rel):
+            p = root / rel
+            try:
+                p.resolve().relative_to(root.resolve())
+                if not p.is_file():
+                    continue
+                size = p.stat().st_size
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if size <= BUNDLE_MAX and total + size <= BUNDLE_TOTAL:
+                r["bundled"] = True
+                total += size
+    return out
+
+
+def _have(r, root):
+    """使用者电脑上有没有这样东西。"""
+    import shutil
+    k = r["kind"]
+    if k in ("file", "dir"):
+        if r.get("rel"):
+            return (Path(root) / r["rel"]).exists()
+        ref = r.get("ref") or ""
+        return bool(ref) and "{" not in ref and Path(os.path.expanduser(ref)).exists()
+    if k == "skill":
+        return r["name"] in _installed_skills()
+    if k == "mcp":
+        return r["name"] in _installed_mcps()
+    if k == "cli":
+        return bool(shutil.which(r["name"]))
+    return True
+
+
+def migrate(bus, root, agents, can_run, who_fn):
+    """导入后（或主人点“重新检查”）按这台电脑自动迁移。agents：本机队员 {id: agent}；can_run(id)：装了、没封印、能命令行派活；
+    who_fn(tag)：谁挂着这个岗位。返回迁移报告，同时写好 personal.json 里的自动改法（auto），jobs 由调用方写进阵容。"""
+    pb = load(bus)
+    if not pb:
+        return None
+    reqs = pb["manifest"].get("requires") or []
+    reqs = [r for r in reqs if isinstance(r, dict) and r.get("kind") in KIND_NAMES
+            and isinstance(r.get("name"), str) and isinstance(r.get("steps"), list)]
+    for r in reqs:
+        r["have"] = _have(r, root)
+    runnable = {aid: a for aid, a in agents.items() if can_run(aid)}
+    known_names = {}
+    for aid, a in agents.items():  # 作者阵容里的名字（Gemini、zcode…）出现在步骤里，提醒干活的人不用去找它
+        for n in {a.get("name"), aid, a.get("vendor") if a.get("vendor") not in ("Google", "OpenAI", "Anthropic") else None}:
+            if n and len(n) >= 3:
+                known_names[n] = aid
+    steps, jobs, auto = [], {}, {}
+    for s in pb["steps"]:
+        holders = []
+        for t in s["tags"]:
+            for r in who_fn(t):
+                if r["id"] in runnable and r["id"] not in holders:
+                    holders.append(r["id"])
+        status, pick, lack = "ok", (holders[0] if holders else None), []
+        if pick:
+            lack = [c for c in s["caps"] if c not in (runnable[pick].get("caps") or [])]
+        else:  # 没人挂这个岗位：按需要的能力挑最合适的
+            scored = sorted(runnable.items(), key=lambda kv: (-sum(c in (kv[1].get("caps") or []) for c in s["caps"]), kv[0]))
+            if scored and (not s["caps"] or any(c in (scored[0][1].get("caps") or []) for c in s["caps"])):
+                pick = scored[0][0]
+                lack = [c for c in s["caps"] if c not in (runnable[pick].get("caps") or [])]
+                status = "auto"
+                for t in s["tags"]:
+                    jobs.setdefault(pick, {})["tag:" + t] = "prefer"
+            else:
+                status = "manual"
+        if pick and lack:
+            status = "partial"
+        notes = []
+        for r in reqs:
+            if not r["have"] and s["id"] in r["steps"]:
+                notes.append(FALLBACK.get(r["kind"], FALLBACK["file"]).format(name=r["name"]))
+        if lack:
+            notes.append(f"这一步原本要用到「{'、'.join(CAPS.get(c, c) for c in lack)}」，你可能没有：做不到的部分直接说明，交给主位安排别人或主人。")
+        others = sorted({m.group(0) for n, aid in known_names.items() if aid != pick
+                         for m in [re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", s["body"], re.I)] if m})
+        if others and pick:
+            notes.append(f"文中提到的 {'、'.join(others)} 是原作者的队员分工；在这里这一步由你（{agents[pick]['name']}）来做，不用去找它们。")
+        if status == "manual":
+            notes.append("这台电脑上没有能做这一步的队员：主位自己做，或者交给主人手动完成。")
+        if notes:
+            auto[s["id"]] = notes
+        steps.append({"id": s["id"], "name": s["name"], "status": status, "agent": pick, "agent_name": agents[pick]["name"] if pick else None,
+                      "lack": [CAPS.get(c, c) for c in lack], "notes": notes})
+    personal = personal_of(bus)
+    personal["auto"] = auto
+    with _pb_lock(bus):
+        _atomic(pb_dir(bus) / "personal.json", json.dumps(personal, ensure_ascii=False, indent=2))
+        report = {"date": time.strftime("%Y-%m-%d %H:%M"), "steps": steps,
+                  "requires": [{k: r.get(k) for k in ("kind", "name", "steps", "have", "bundled", "hint")} | {"kind_name": KIND_NAMES.get(r["kind"], r["kind"])} for r in reqs]}
+        _atomic(pb_dir(bus) / "migration.json", json.dumps(report, ensure_ascii=False, indent=2))
+    return dict(report, jobs=jobs)
+
+
+def migration_of(bus):
+    f = pb_dir(bus) / "migration.json"
+    try:
+        return json.loads(f.read_text("utf-8")) if f.exists() else None
+    except ValueError:
+        return None

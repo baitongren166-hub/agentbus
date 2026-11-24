@@ -73,6 +73,32 @@ def group_kwargs(hidden=True):
     return {"start_new_session": True}
 
 
+def pid_alive(pid):
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        if IS_WIN:
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+            if not handle:
+                return False
+            try:
+                kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+                return kernel.WaitForSingleObject(handle, 0) == 0x102  # WAIT_TIMEOUT
+            finally:
+                kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+                kernel.CloseHandle(handle)
+        os.kill(pid, 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def kill_tree(p):
     if IS_WIN:
         subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True)
@@ -152,6 +178,24 @@ def extra_paths():
         return []
     d = Path(os.path.expanduser(d))
     return [str(d), str(d / "bin")]
+
+
+def proxy_env():
+    """从系统代理设置里补上 HTTP(S)_PROXY：应用拉起的服务没有终端里的代理变量，而很多命令行（反重力等 Go / Node 写的）
+    不读系统代理，只认环境变量，直连外网会超时（反重力因此刷新不了登录、退回网页登录）。本机地址一律不走代理。"""
+    import urllib.request
+    try:
+        sysp = urllib.request.getproxies_macosx_sysconf() if IS_MAC else urllib.request.getproxies_registry() if IS_WIN else {}
+    except (AttributeError, OSError):
+        sysp = {}
+    envp = urllib.request.getproxies_environment()
+    for scheme in ("http", "https"):
+        if sysp.get(scheme) and not (envp.get(scheme) or envp.get("all")):
+            os.environ[f"{scheme.upper()}_PROXY"] = os.environ[f"{scheme}_proxy"] = sysp[scheme]
+    local = ("localhost", "127.0.0.1", "::1", ".local")
+    excluded = [os.environ.get(k, "") for k in ("no_proxy", "NO_PROXY")] + [sysp.get("no") or ""]
+    bypass = dict.fromkeys(x.strip() for x in ",".join(excluded).split(",") if x.strip())
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = ",".join(dict.fromkeys([*bypass, *local]))
 
 
 def which(cmd):

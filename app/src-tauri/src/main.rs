@@ -7,8 +7,10 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -19,12 +21,38 @@ const URL: &str = "http://127.0.0.1:8790/";
 
 fn http_get(path: &str) -> Option<String> {
     let mut s = TcpStream::connect_timeout(&ADDR.parse().ok()?, Duration::from_millis(400)).ok()?;
-    s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    // 英特尔 Mac 上打包版服务刚起来时很慢：读超时给宽一点，慢不等于挂了
+    s.set_read_timeout(Some(Duration::from_secs(15))).ok()?;
     write!(s, "GET {path} HTTP/1.0\r\nHost: {ADDR}\r\n\r\n").ok()?;
     let mut buf = String::new();
     s.read_to_string(&mut buf).ok()?;
     buf.split_once("\r\n\r\n").map(|(_, b)| b.to_string())
 }
+
+/// 服务端口有没有人在听：只看连不连得上，不等回应（服务忙、慢都算活着）
+fn service_listening() -> bool {
+    ADDR.parse().ok().and_then(|a| TcpStream::connect_timeout(&a, Duration::from_millis(400)).ok()).is_some()
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// 应用自己的日志（临时目录 agentbus-app.log）：服务掉线、拉起、悬浮窗重载都记一笔，悬浮窗出问题时看这里
+fn applog(msg: &str) {
+    let f = std::env::temp_dir().join("agentbus-app.log");
+    if std::fs::metadata(&f).map(|m| m.len() > 512 * 1024).unwrap_or(false) {
+        let _ = std::fs::remove_file(&f);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
+        let _ = writeln!(f, "{} {msg}", now_secs());
+    }
+}
+
+/// 应用拉起的那个服务进程：它还活着（可能还在启动）就不再拉第二个
+static SPAWNED: Mutex<Option<Child>> = Mutex::new(None);
+/// 悬浮窗网页最近一次报平安的时间（秒）；0 = 还没报过
+static HUD_BEAT: AtomicU64 = AtomicU64::new(0);
 
 /// 打包好的服务程序（PyInstaller 文件夹版，作为应用资源放在 core-bin/ 里）。发布版用它，用户不用装 Python。
 fn sidecar(app: &AppHandle) -> Option<PathBuf> {
@@ -98,11 +126,19 @@ fn refresh_bundled_service(app: &AppHandle) {
     }
 }
 
-/// 服务独立运行，供应用和命令行共用。
+/// 服务没开就开一个。服务单独跑（不跟着应用退出），Claude 的浏览器和命令行随时能连。
 fn ensure_service(app: &AppHandle) {
-    if http_get("/api/health").is_some() {
+    if service_listening() {
         return;
     }
+    // 上次拉起的服务还在跑（英特尔 Mac 上打包版第一次启动要好几十秒）：等它，别再拉一个跟它抢端口
+    let mut spawned = SPAWNED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = spawned.as_mut() {
+        if matches!(c.try_wait(), Ok(None)) {
+            return;
+        }
+    }
+    // 发布版优先使用自己的服务，只有显式指定 AGENTBUS_CORE 才覆盖。
     let dev = std::env::var_os("AGENTBUS_CORE").map(|p| PathBuf::from(p).join("service.py")).filter(|p| p.is_file());
     let mut cmd = if let Some(script) = dev {
         let mut c = python_cmd();
@@ -129,12 +165,18 @@ fn ensure_service(app: &AppHandle) {
     cmd.stdin(Stdio::null());
     no_window(&mut cmd);
     let log = std::env::temp_dir().join("agentbus-service.log");
-    if let Ok(f) = std::fs::File::create(&log) {
+    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
         if let Ok(f2) = f.try_clone() {
             cmd.stdout(f).stderr(f2);
         }
     }
-    let _ = cmd.spawn();
+    match cmd.spawn() {
+        Ok(c) => {
+            applog(&format!("拉起本地服务 pid={}", c.id()));
+            *spawned = Some(c);
+        }
+        Err(e) => applog(&format!("拉起本地服务失败：{e}")),
+    }
 }
 
 /// 打开主窗口：关掉时窗口是真的销毁了（网页进程攥着的立绘图层才会还给系统，藏起来不还），要用时再新建。
@@ -359,6 +401,31 @@ fn hud_visible(app: AppHandle, on: bool) {
     }
 }
 
+/// 悬浮窗网页每 10 秒报一次平安：报不上来（没加载出来、网页进程崩了）就由后台重新加载它
+#[tauri::command]
+fn hud_beat() {
+    HUD_BEAT.store(now_secs(), Ordering::Relaxed);
+}
+
+/// macOS：悬浮窗不跟着应用一起藏（⌘H、应用被收起、切走时都还在）
+#[cfg(target_os = "macos")]
+fn pin_hud(win: &tauri::WebviewWindow) {
+    use std::ffi::{c_char, c_void};
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_msgSend();
+        fn sel_registerName(name: *const c_char) -> *const c_void;
+    }
+    let Ok(ns) = win.ns_window() else { return };
+    unsafe {
+        let send: extern "C" fn(*mut c_void, *const c_void, i8) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        send(ns, sel_registerName(c"setCanHide:".as_ptr()), 0);
+        send(ns, sel_registerName(c"setHidesOnDeactivate:".as_ptr()), 0);
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn pin_hud(_win: &tauri::WebviewWindow) {}
+
 #[tauri::command]
 fn open_main(app: AppHandle, page: Option<String>) {
     show_main(&app, page.as_deref());
@@ -370,13 +437,14 @@ fn working_count(body: &str) -> usize {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![hud_resize, hud_front, hud_visible, open_main, hud_pos, hud_place, hud_snap, hud_through])
+        .invoke_handler(tauri::generate_handler![hud_resize, hud_front, hud_visible, open_main, hud_pos, hud_place, hud_snap, hud_through, hud_beat])
         .setup(|app| {
             // 只在菜单栏和悬浮窗里出现，不占 Dock
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let handle = app.handle().clone();
+            applog(&format!("应用启动 {} {}", std::env::consts::ARCH, env!("CARGO_PKG_VERSION")));
             refresh_bundled_service(&handle);
             ensure_service(&handle);
             let hh = handle.clone();
@@ -404,6 +472,10 @@ fn main() {
                 .focused(false)
                 .accept_first_mouse(true)
                 .build()?;
+            if let Some(w) = app.get_webview_window("hud") {
+                pin_hud(&w);
+            }
+            let hud_built = Instant::now();
 
             let open = MenuItem::with_id(app, "open", "打开基地", true, None::<&str>)?;
             let hud = MenuItem::with_id(app, "hud", "显示悬浮窗", true, None::<&str>)?;
@@ -455,27 +527,49 @@ fn main() {
                 })
                 .build(app)?;
 
-            // 菜单栏图标旁显示几位在干活；服务挂了就拉起来，恢复后刷新两个窗口
+            // 菜单栏图标旁显示几位在干活；服务挂了就拉起来，恢复后刷新两个窗口；悬浮窗报不上平安就重新加载它
             std::thread::spawn(move || {
-                let mut was_down = false;
+                // down = 连续几次连不上端口（真挂了）；慢、超时不算挂
+                let (mut down, mut was_down) = (0u32, false);
+                let mut last_reload = Instant::now();
                 loop {
                     match http_get("/api/state") {
                         Some(body) => {
+                            down = 0;
                             if was_down {
+                                applog("本地服务恢复，刷新窗口");
                                 for label in ["main", "hud"] {
                                     if let Some(w) = handle.get_webview_window(label) {
                                         let _ = w.eval("location.reload()");
                                     }
                                 }
                                 was_down = false;
+                                last_reload = Instant::now();
                             }
                             let n = working_count(&body);
                             let _ = tray.set_title(if n > 0 { Some(format!("{n}")) } else { None::<String> });
                             let _ = tray.set_tooltip(Some(if n > 0 { format!("agentbus · {n} 位在干活") } else { "agentbus · 都闲着".into() }));
+                            // 悬浮窗开着却 45 秒没报平安（第一次加载时服务还没起来、网页进程崩了）：重新加载，最多 30 秒一次
+                            if let Some(w) = handle.get_webview_window("hud") {
+                                let beat = HUD_BEAT.load(Ordering::Relaxed);
+                                let stale = if beat == 0 { hud_built.elapsed() > Duration::from_secs(20) } else { now_secs().saturating_sub(beat) > 45 };
+                                if stale && w.is_visible().unwrap_or(false) && last_reload.elapsed() > Duration::from_secs(30) {
+                                    applog(&format!("悬浮窗没报平安（上次 {beat}），重新加载"));
+                                    let _ = w.navigate(URL.parse::<tauri::Url>().unwrap().join("hud.html").unwrap());
+                                    last_reload = Instant::now();
+                                }
+                            }
                         }
+                        None if service_listening() => {} // 连得上、只是这次没回应：服务在忙，不动它
                         None => {
-                            was_down = true;
-                            ensure_service(&handle);
+                            down += 1;
+                            if down >= 2 {
+                                if !was_down {
+                                    applog("本地服务连不上");
+                                }
+                                was_down = true;
+                                ensure_service(&handle);
+                            }
                         }
                     }
                     std::thread::sleep(Duration::from_secs(4));

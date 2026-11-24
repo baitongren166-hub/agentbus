@@ -18,6 +18,7 @@
     "allow-hud-pos",
     "allow-hud-place",
     "allow-hud-snap",
-    "allow-hud-through"
+    "allow-hud-through",
+    "allow-hud-beat"
   ]
 }

@@ -220,8 +220,12 @@ def hello(args):
     lines.append("按岗位派，别按记忆里的名字派：谁能干什么以上面这份战备为准。项目文档、记忆里写死的“某某做某事、要主人手动转交”只是当时的分工；"
                  "一个岗位上有能命令行派活的队员，就直接派给他，不要自己写文档让主人转交。之后队伍有变化（谁能派活了、换了模型、换了岗位），"
                  "agentbus 会在你下一句话前用「队伍变化」告诉你。")
-    lines.append("回音规则：派出去的活一定要能叫醒你——要么 Bash 后台跑 `agentbus ask …`（做完就结束），要么 agentbus_dispatch 之后 Bash 后台跑 `agentbus wait <job id>`。"
-                 "不要干等、也不要等主人提醒；新结果也会附在之后任何一个 agentbus 工具的返回里。")
+    if os.environ.get("AGENTBUS_HEADLESS"):  # 飞书等处的无头窗口：一轮回复完进程就结束，后台等待会被一起收掉
+        lines.append("回音规则（你在无头窗口里，主人在手机上看，你一轮回复完就会停下）：派活用 agentbus_dispatch（命令行就用 `agentbus ask … --detach`），"
+                     "派完马上回复主人派给了谁、干什么，不用 wait；活做完 agentbus 会把「[agentbus 回音]」发进这个窗口叫醒你，你核对后再向主人汇报。")
+    else:
+        lines.append("回音规则：派出去的活一定要能叫醒你——要么 Bash 后台跑 `agentbus ask …`（做完就结束），要么 agentbus_dispatch 之后 Bash 后台跑 `agentbus wait <job id>`。"
+                     "不要干等、也不要等主人提醒；新结果也会附在之后任何一个 agentbus 工具的返回里。")
     from config import update_json as _uj
     conv_k = _conv_key()
     try:  # 记下这次告诉主位的队伍样子：以后有变化，钩子在下一句话前补一条「队伍变化」
@@ -255,6 +259,8 @@ def dispatch(args):
         jid = start_job(args)
     except ValueError as exc:
         return str(exc)
+    if os.environ.get("AGENTBUS_HEADLESS"):
+        return f"已提交派活请求，job id：{jid}。这一轮先回复主人，完成后 agentbus 会送回音。"
     return (f"已提交派活请求，job id：{jid}。\n"
             f"现在就用 Bash 后台（run_in_background）跑：agentbus wait {jid}\n"
             "——它在这单做完或失败时结束，你会被自动叫醒拿到回复，不要等主人提醒；同时可以接着干别的。\n"
@@ -274,14 +280,17 @@ def start_job(args, env_extra=None, cwd=None):
     JOBS.mkdir(parents=True, exist_ok=True)
     jid = time.strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     import pf
-    from config import project_of_dir
+    import tempfile
+    from config import project_of_dir, save_json
     cmd = pf.cli_cmd()
     args = dict(args)
     if not args.get("project"):  # 从哪个目录的对话里派的，就记在哪个项目
         args["project"] = project_of_dir(cwd or os.getcwd())
     if args.get("project"):
         cmd += ["-p", args["project"]]
-    cmd += ["ask", args["agent"], args["task"]]
+    cmd += ["ask", args["agent"], "-"]
+    if args.get("sender"):
+        cmd += ["--from", args["sender"]]
     if args.get("new", True):
         cmd.append("--new")
     if args.get("file"):
@@ -290,24 +299,44 @@ def start_job(args, env_extra=None, cwd=None):
         cmd += ["--title", str(args["title"])[:40]]
     if args.get("tag"):
         cmd += ["--tag", args["tag"]]
-    log = JOBS / f"{jid}.log"
-    with open(log, "w") as f:
-        p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, **pf.group_kwargs(),
-                             cwd=str(project(args.get("project"))[1]), env={**os.environ, "AGENTBUS_SELF": os.environ.get("AGENTBUS_SELF", "claude"), "AGENTBUS_CONV": _conv_full(), **(env_extra or {})})
-    (JOBS / f"{jid}.json").write_text(json.dumps({"pid": p.pid, "cmd": cmd[2:], "start": time.time()}, ensure_ascii=False))
+    if args.get("allow_credits"):
+        cmd.append("--allow-credits")
+    name = args.get("project")
+    try:
+        pname, root, _, _ = project(name)
+    except SystemExit as e:
+        raise ValueError(str(e)) from e
+    if pname == "通用" and cwd is not None:
+        root = cwd
+    env = {**os.environ, "AGENTBUS_SELF": os.environ.get("AGENTBUS_SELF", "claude"),
+           "AGENTBUS_CONV": _conv_full(), **(env_extra or {}), "AGENTBUS_JOB": jid, "PYTHONIOENCODING": "utf-8"}
+    start = time.time()
+    with (JOBS / f"{jid}.log").open("w", encoding="utf-8") as log, tempfile.TemporaryFile() as prompt:
+        prompt.write(args["task"].encode("utf-8"))
+        prompt.seek(0)
+        p = subprocess.Popen(cmd, stdin=prompt, stdout=log, stderr=subprocess.STDOUT, **pf.group_kwargs(), cwd=str(root), env=env)
+    try:
+        save_json(JOBS / f"{jid}.json", {"pid": p.pid, "start": start, "agent": args["agent"], "conv": env["AGENTBUS_CONV"][:12]})
+    except OSError:
+        p.terminate()
+        raise
     return jid
 
 
 def job_state(jid):
     """(还在跑吗, 输出全文, 开始时间)"""
-    meta = json.loads((JOBS / f"{jid}.json").read_text())
-    alive = True
-    try:
-        os.kill(meta["pid"], 0)
-        st = subprocess.run(["ps", "-o", "stat=", "-p", str(meta["pid"])], capture_output=True, text=True).stdout.strip()
-        alive = bool(st) and not st.startswith("Z")
-    except OSError:
-        alive = False
+    import re
+    import pf
+    if not re.fullmatch(r"\d{4}-\d{6}-[a-f0-9]{4}", jid):
+        raise ValueError("工单号无效")
+    meta = json.loads((JOBS / f"{jid}.json").read_text("utf-8"))
+    alive = pf.pid_alive(meta.get("pid"))
+    if alive and not pf.IS_WIN:
+        try:
+            st = subprocess.run(["ps", "-o", "stat=", "-p", str(meta["pid"])], capture_output=True, text=True, timeout=3).stdout.strip()
+            alive = bool(st) and not st.startswith("Z")
+        except (OSError, subprocess.SubprocessError):
+            pass
     return alive, (JOBS / f"{jid}.log").read_text("utf-8", "ignore"), meta["start"]
 
 
@@ -398,7 +427,9 @@ def call(name, args):
 
 def _announce(client):
     """有 agent 接入：认出是谁（它就是现在的主位），告诉本地服务让悬浮窗弹出来；服务没开就把应用拉起来。"""
-    from config import agent_of_client, is_working_as_member, touch_lead, whoami
+    from config import agent_of_client, is_working_as_member, whoami
+    if os.environ.get("AGENTBUS_FEISHU"):
+        return
     import urllib.request
     me = agent_of_client(client) or whoami()
     if me and is_working_as_member(me):  # 被派活的队员干活时连上来的，不打招呼、不抢主位

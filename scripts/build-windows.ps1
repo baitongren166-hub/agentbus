@@ -6,7 +6,7 @@ $missing = @()
 foreach ($t in "python", "node", "npm", "cargo") { if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { $missing += $t } }
 if ($missing.Count) { Write-Host "缺少：$($missing -join '、')。按《Windows打包说明.md》第 1 步装好后重开 PowerShell 再运行。" -ForegroundColor Red; exit 1 }
 Write-Host "== 1/3 打包本地服务（Python → agentbus-core.exe）==" -ForegroundColor Cyan
-python -m pip install --upgrade pyinstaller
+python -m pip install --upgrade pyinstaller Pillow
 python scripts\build-core.py
 Write-Host "== 2/3 安装应用依赖 ==" -ForegroundColor Cyan
 Set-Location app

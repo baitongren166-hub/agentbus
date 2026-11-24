@@ -272,7 +272,47 @@ def acts_opencode():
     return out
 
 
-SOURCES = {"claude": acts_claude, "zcode": acts_zcode, "codex": acts_codex, "opencode": acts_opencode}
+AG_ROOTS = ("~/.gemini/antigravity", "~/.gemini/antigravity-cli")  # 反重力桌面 / 命令行 agy 的数据目录
+AG_TRANSCRIPT = "/brain/*/.system_generated/logs/transcript.jsonl"  # 一个对话一份，一步一行（追加写）
+
+
+def _ag_main(f):
+    """主人（或派活）开的对话第一步是 USER_EXPLICIT 的输入；反重力自己起的子对话（生图、Browser Viewer…）第一步是系统消息。"""
+    try:
+        with open(f, encoding="utf-8", errors="ignore") as fh:
+            d0 = json.loads(fh.readline() or "{}")
+        return isinstance(d0, dict) and d0.get("type") == "USER_INPUT" and d0.get("source") == "USER_EXPLICIT"
+    except (OSError, ValueError):
+        return False
+
+
+def acts_antigravity():
+    """反重力最近动过的那个对话：PLANNER_RESPONSE 一步里有思考（thinking）、工具调用（tool_calls）、回复（content）。"""
+    fs = [f for r in AG_ROOTS for f in _recent_files(r + AG_TRANSCRIPT, 30 * 60)]
+    f = max(fs, key=os.path.getmtime) if fs else None
+    out = []
+    if not f:
+        return out
+    for l in tail_lines(f, 400_000)[-60:]:
+        try:
+            d = json.loads(l)
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") != "PLANNER_RESPONSE":
+            continue
+        t = iso_ts(d.get("created_at"))
+        if d.get("thinking"):
+            out.append((t, "想", short(d["thinking"])))
+        for c in d.get("tool_calls") or []:
+            i = c.get("args") or {}
+            i = {k: (v.strip('"') if isinstance(v, str) else v) for k, v in i.items()} if isinstance(i, dict) else {}
+            out.append((t, "做", f"[{c.get('name')}] " + short(i.get("CommandLine") or i.get("Path") or i.get("AbsolutePath") or i.get("TargetFile") or i)))
+        if d.get("content"):
+            out.append((t, "说", short(d["content"])))
+    return out
+
+
+SOURCES = {"claude": acts_claude, "zcode": acts_zcode, "codex": acts_codex, "opencode": acts_opencode, "antigravity": acts_antigravity}
 
 
 def recent(kind, n=12):
@@ -378,7 +418,27 @@ def live_claude():
     return bool(sessions_claude())
 
 
-LIVE = {"codex": live_codex, "claude": live_claude}
+def live_antigravity():
+    """反重力有对话在一轮中间：最后一步不是“不带工具调用的回复”（主人刚发话 / 刚调了工具 / 工具在跑）。
+    它不记“这一轮结束了”，被中途停掉的对话最后一步会一直停在工具上，所以只看 10 分钟内写过的。"""
+    for r in AG_ROOTS:
+        for f in _recent_files(r + AG_TRANSCRIPT, 10 * 60):
+            if not _ag_main(f):
+                continue  # 子对话在跑时主对话自己也停在工具调用上，看主对话就够了
+            last = None
+            for l in tail_lines(f, 200_000)[-20:]:
+                try:
+                    row = json.loads(l)
+                    if isinstance(row, dict):
+                        last = row
+                except json.JSONDecodeError:
+                    pass
+            if last and not (last.get("type") == "PLANNER_RESPONSE" and not last.get("tool_calls")):
+                return True
+    return False
+
+
+LIVE = {"codex": live_codex, "claude": live_claude, "antigravity": live_antigravity}
 
 
 def live(kind, acts=None):
@@ -497,7 +557,7 @@ def starts_antigravity(within):
     """反重力（桌面 ~/.gemini/antigravity、命令行 agy ~/.gemini/antigravity-cli）：conversations/<UUID>.db 一个对话。
     它的库普通只读打不开，所以不碰库：按新出现的文件找对话，第一句从 brain/<UUID>/…/transcript.jsonl 里读 <USER_REQUEST>。"""
     out = []
-    for root in ("~/.gemini/antigravity", "~/.gemini/antigravity-cli"):
+    for root in AG_ROOTS:
         for f in _recent_files(root + "/conversations/*.db", within):
             try:
                 st = os.stat(f)
@@ -520,7 +580,8 @@ def starts_antigravity(within):
                 pass
             if helper:
                 continue
-            out.append({"agent": "gemini", "name": "Antigravity", "conv": uid, "cwd": "", "t": getattr(st, "st_birthtime", st.st_ctime), "first": first})
+            out.append({"agent": "gemini", "name": "Antigravity", "conv": uid, "cwd": "", "t": getattr(st, "st_birthtime", st.st_ctime), "first": first,
+                        "desktop": root == AG_ROOTS[0]})  # 派活只走命令行 agy，桌面目录里的一定是主人自己开的
     return out
 
 
@@ -636,7 +697,7 @@ def new_conversations(within=600):
                     continue
                 if mine is None:
                     mine, wins = _dispatched_ids(), _dispatch_windows()
-                if x["conv"] in mine or _from_dispatch(x, wins):
+                if x["conv"] in mine or (not x.get("desktop") and _from_dispatch(x, wins)):
                     continue
                 out.append(x)
         except Exception:

@@ -535,6 +535,12 @@ body.asking:not(.troupe):not(.multi) .island:not(.open) .pill { background: var(
 .fz.on .fz-ic { background: #5e5ce6; box-shadow: 0 0 10px rgba(94, 92, 230, .55); }
 .fz.on .fz-ic svg { transform: rotate(-18deg); }
 .fz.on .fz-t { color: #c9c8ff; }
+.fzs { display: flex; gap: 6px; }
+.fz.aw.on .fz-ic { background: #ff9f0a; box-shadow: 0 0 10px rgba(255, 159, 10, .55); }
+.fz.aw.on .fz-ic svg { transform: none; }
+.fz.aw.on .fz-t { color: #ffd59a; }
+.fz-ic { position: relative; }
+.aw-dot { position: absolute; top: -1px; right: -1px; width: 6px; height: 6px; border-radius: 50%; background: #ff453a; box-shadow: 0 0 0 1.5px rgba(30,29,34,.9); }
 .vt button .i { width: 14px; height: 14px; }
 
 /* 胶囊再长也不超过 560：名字和任务那段省略号收短，时间、额度不缩，专注按钮就不会压在胶囊上 */

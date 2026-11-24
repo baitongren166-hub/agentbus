@@ -179,11 +179,11 @@ def failure_issue(agent, status, detail=""):
     return {"text": text, "action": action, "status": status, "agent": aid}
 
 
-def failure(channel, agent, status, detail="", *, issues=None):
+def failure(channel, agent, status, detail="", *, issues=None, **extra):
     issue = failure_issue(agent, status, detail)
     if issues is not None:
         issues.append(issue)
-    return append(channel, "agentbus", issue["text"], system=True, issue=issue)
+    return append(channel, "agentbus", issue["text"], system=True, issue=issue, **extra)
 
 
 def display_messages(messages):
@@ -325,14 +325,14 @@ def conv_of(channel):
     return "chat-" + hashlib.md5(channel.encode()).hexdigest()[:7]  # 12 位，一个频道一个，派活记录和账单按它分
 
 
-def send(channel, text, frm="user", hops=0, cwd=None, files=None, *, target=None, issues=None):
+def send(channel, text, frm="user", hops=0, cwd=None, files=None, *, target=None, issues=None, reply_job=None):
     """发一条消息。派活模式：@ 到的队员各派一单（没 @ 人就交给值班的）；群聊模式：主人一句话，队员轮流接着聊。
     返回 (消息, [派出去的 job id])。"""
     cfg = load_config()
     L = lim()
     text = text[:L["max_text"]]
     mt = meta(channel)
-    msg = append(channel, frm, text, hops=hops, files=files or [])
+    msg = append(channel, frm, text, hops=hops, files=files or [], reply_job=reply_job)
     jobs = []
     if frm != "user" and hops >= L["hops"]:
         append(channel, "agentbus", f"⏸ 队员之间已经接力了 {hops} 次，先停一下，等主人看看（主人 @ 谁都会继续）。", system=True)
@@ -354,7 +354,7 @@ def send(channel, text, frm="user", hops=0, cwd=None, files=None, *, target=None
             return msg, jobs
     from config import locked
     with locked("chat-" + conv_of(channel)):  # 同一个频道的准入和派活排队做：几条消息同时到也不会超出并发上限
-        return msg, _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L, issues)
+        return msg, _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L, issues, source=msg["id"])
 
 
 def _wait_registered(jid, timeout=6):
@@ -371,7 +371,7 @@ def _wait_registered(jid, timeout=6):
         time.sleep(0.2)
 
 
-def _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L, issues=None):
+def _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L, issues=None, *, source=None, allow_credits=False):
     jobs = []
     busy = len(running(channel))
     for aid in who:
@@ -395,7 +395,7 @@ def _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L, issues=N
             failure(channel, a, "cli_unavailable", issues=issues)
             continue
         try:
-            jid = dispatch(channel, aid, text, frm, hops, cwd, files)
+            jid = dispatch(channel, aid, text, frm, hops, cwd, files, allow_credits=allow_credits, source=source)
         except (OSError, ValueError, SystemExit):
             import logging
             logging.exception("无法提交聊天室工单给 %s", aid)
@@ -407,7 +407,7 @@ def _dispatch_all(channel, who, agents, text, frm, hops, cwd, files, L, issues=N
     return jobs
 
 
-def dispatch(channel, aid, text, frm, hops, cwd=None, files=None):
+def dispatch(channel, aid, text, frm, hops, cwd=None, files=None, allow_credits=False, *, source=None):
     import mcp_server
     names = {k: v.get("name", k) for k, v in agents_dict(load_config()).items()}
     att = "".join(f"\n附件：{x['path']}" for x in files or [])
@@ -417,7 +417,9 @@ def dispatch(channel, aid, text, frm, hops, cwd=None, files=None):
             "需要别的队员接着做，就在回复里 @ 他（比如 @GPT），他会被叫醒接力。")
     env = {"AGENTBUS_CHAT": channel, "AGENTBUS_CHAT_HOPS": str(hops + (0 if frm == "user" else 1)), "AGENTBUS_CONV": conv_of(channel),
            "AGENTBUS_SELF": frm if frm != "user" else "user"}
-    args = {"agent": aid, "task": task, "tag": None, "new": True}
+    if source:
+        env["AGENTBUS_CHAT_SOURCE"] = source
+    args = {"agent": aid, "task": task, "tag": None, "new": True, "allow_credits": allow_credits}
     jid = mcp_server.start_job(args, env_extra=env, cwd=cwd)
     append(channel, "agentbus", f"⏳ 已提交给 {names.get(aid, aid)}，等待执行器启动", system=True, job=jid, agent=aid)
     return jid
@@ -448,11 +450,8 @@ def start_talk(channel, msg_id, cwd=None):
 
 
 def _alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError):
-        return False
+    import pf
+    return pf.pid_alive(pid)
 
 
 def _start_talk(channel, msg_id, cwd=None):
